@@ -198,9 +198,21 @@ DWA_CROSSING_COMMIT_CANCEL_SECONDS = 1.20  # matches the near-term dynamic safet
 # lib/controller/python/controller/camera.py index red at byte offset +2, green
 # at +1 and blue at +0 of each 4-byte pixel, so robot_io.get_camera_bgr()'s
 # bgra[:, :, :3] slice really is BGR and cv2.COLOR_BGR2HSV is correct.
-VISION_RED_LOW_1 = (0, 100, 80)
+#
+# The saturation floor is measured, not guessed.  In worlds/practice.wbt the
+# rendered HSV medians are:
+#   red target panel   (baseColor 0.90 0.02 0.02): H 0, S 237, V 172
+#   "center obstacle"  (baseColor 0.82 0.24 0.18): H 2, S 152, V 164
+# Hue cannot separate them (0 vs 2) and neither can value (172 vs 164), but
+# saturation separates them with a wide margin, so the floor sits between the
+# two at 190: 38 counts above the non-target slab, 47 counts below the target.
+# With the old floor of 100 the slab filled a third of the frame and was
+# accepted as a clipped target.
+# EVENT DAY: a real target with specular highlights or shading can be less
+# saturated than this flatly lit panel -- re-measure before trusting 190.
+VISION_RED_LOW_1 = (0, 190, 80)
 VISION_RED_HIGH_1 = (10, 255, 255)
-VISION_RED_LOW_2 = (170, 100, 80)
+VISION_RED_LOW_2 = (170, 190, 80)
 VISION_RED_HIGH_2 = (179, 255, 255)
 # Smallest blob accepted as a target.  A distant target is small: 60 px is a
 # disc of radius ~4.4 px, while camera speckle and a stray anti-aliased edge

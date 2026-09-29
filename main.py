@@ -1,6 +1,7 @@
 """Webots practice adapter for the sensor based local avoidance controller."""
 
 import math
+import os
 
 from avoidance import DynamicWindowAvoidance
 from config import (
@@ -20,6 +21,23 @@ PRACTICE_WAYPOINTS = (
     (-1.45, 1.45), (1.45, 1.45), (1.45, -1.45),
     (-1.45, -1.45), (-1.45, 0.0),
 )
+
+
+# DIAGNOSTIC ONLY: VISION_FRAME_LOG=1 logs every frame in which a target is
+# detected, for verifying detection across image positions and distances.
+VISION_FRAME_LOG = os.environ.get("VISION_FRAME_LOG") == "1"
+
+
+def describe_target(target):
+    """One-line summary of a TargetDetector result, for the practice log."""
+    return (
+        f"shape={target['shape']} "
+        f"center=({target['center_x']:.0f},{target['center_y']:.0f}) "
+        f"offset=({target['offset_x']:+.3f},{target['offset_y']:+.3f}) "
+        f"bbox={target['bbox']} area={target['area']:.0f} "
+        f"area_ratio={target['area_ratio']:.5f} "
+        f"confidence={target['confidence']:.3f} clipped={target['clipped']}"
+    )
 
 
 def goal_in_robot_frame(goal, pose):
@@ -115,11 +133,20 @@ def main():
         robot_io.set_wheel_speed(left, right)
 
         target = detector.detect(robot_io.get_camera_bgr())
+        if VISION_FRAME_LOG and target["detected"]:
+            print(
+                f"[VDET] t={robot.getTime():.3f} "
+                f"pose=({position[0]:.2f},{position[1]:.2f},{heading:.3f}) "
+                + describe_target(target),
+                flush=True,
+            )
         if control_mode != last_control_mode:
             print(f"[CONTROL] {control_mode}")
             last_control_mode = control_mode
         if target["detected"] and not target_visible:
-            print(f"[VISION] TARGET DETECTED center=({target['center_x']:.0f}, {target['center_y']:.0f})")
+            print("[VISION] TARGET DETECTED " + describe_target(target))
+        elif target_visible and not target["detected"]:
+            print(f"[VISION] TARGET LOST t={robot.getTime():.2f}")
         target_visible = target["detected"]
 
         # Contact tracking is diagnostic only and never enters the controller.
@@ -141,6 +168,8 @@ def main():
                     f"left={distances['left']:.2f} right={distances['right']:.2f} "
                     f"action={action}"
                 )
+            if target["detected"]:
+                print("[VISION] " + describe_target(target))
             print("[POSE]", robot.getTime(), position)
             last_print_time = robot.getTime()
 
