@@ -192,14 +192,42 @@ DWA_CROSSING_COMMIT_CANCEL_SECONDS = 1.20  # matches the near-term dynamic safet
 
 # Practice vision target. Replace only this section after the event target
 # specification is published; image-space detections are not world positions.
+#
+# CAMERA FORMAT (verified, not assumed): Webots R2025a returns camera frames as
+# BGRA.  Both the C macro in include/controller/c/webots/camera.h and
+# lib/controller/python/controller/camera.py index red at byte offset +2, green
+# at +1 and blue at +0 of each 4-byte pixel, so robot_io.get_camera_bgr()'s
+# bgra[:, :, :3] slice really is BGR and cv2.COLOR_BGR2HSV is correct.
 VISION_RED_LOW_1 = (0, 100, 80)
 VISION_RED_HIGH_1 = (10, 255, 255)
 VISION_RED_LOW_2 = (170, 100, 80)
 VISION_RED_HIGH_2 = (179, 255, 255)
-VISION_MIN_AREA_PIXELS = 180
+# Smallest blob accepted as a target.  A distant target is small: 60 px is a
+# disc of radius ~4.4 px, while camera speckle and a stray anti-aliased edge
+# pixel stay well below it.
+VISION_MIN_AREA_PIXELS = 60
+# 0 or 1 disables morphology.  Kept small on purpose: a larger kernel erases
+# small distant targets, which is worse than passing a little speckle through
+# to the area and shape gates.
 VISION_MORPH_KERNEL_SIZE = 3
+# Circle gate: 4*pi*A/P^2, 1.0 for a perfect disc.
 VISION_MIN_CIRCULARITY = 0.70
+# Rotation-invariant bounding box (minAreaRect) side ratio; both shapes are
+# nominally 1.0.
 VISION_MAX_ASPECT_RATIO = 1.35
+# Rotation-invariant fill = area / minAreaRect area.  A disc is pi/4 = 0.785,
+# a square is 1.0 at any rotation, which is what separates the two shapes.
+VISION_CIRCLE_FILL_RANGE = (0.62, 0.92)
+VISION_MIN_SQUARE_FILL = 0.82
+# area / convex hull area; rejects ragged and multi-lobed red blobs.
+VISION_MIN_SOLIDITY = 0.88
+# A contour this close to an image edge is treated as clipped: circularity and
+# the side ratio are then unreliable, so only convexity is required.
+VISION_BORDER_MARGIN_PIXELS = 2
+VISION_CLIPPED_MIN_SOLIDITY = 0.88
+VISION_CLIPPED_MAX_ASPECT_RATIO = 3.0
+# Area at which the size term of the bounded quality score saturates.
+VISION_CONFIDENT_AREA_PIXELS = 1200
 
 # Practice-only route follower. The event controller must replace its waypoint
 # source with Planning/A* while retaining wheel-speed and pose conventions.
