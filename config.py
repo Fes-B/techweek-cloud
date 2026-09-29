@@ -179,3 +179,130 @@ PRACTICE_PATH_SPEED = 0.16
 PRACTICE_PATH_TURN_RATE = 1.20
 PRACTICE_PATH_TURN_THRESHOLD = 0.35
 PRACTICE_PATH_HEADING_GAIN = 1.80
+
+# ---------------------------------------------------------------------------
+# ACTIVE (avoidance_v2.py): DWA-primary static avoidance with a pose-progress
+# watchdog and one explicit recovery state machine.
+#
+# The safety model is deliberately NOT redefined here: robot radius, static
+# and dynamic clearance margins, acceleration limits, rollout horizon and
+# sample counts are the DWA_* values above, shared with avoidance.py.
+# ---------------------------------------------------------------------------
+
+# DWA scoring (NORMAL_DWA).  Progress is the decrease of the obstacle-aware
+# cost-to-go along a rollout, normalised by DWA_MAX_LINEAR_SPEED*DWA_HORIZON.
+# Cruise cap for NORMAL_DWA: the legacy DWA limit.  Measured trade-off in
+# Webots: encoder-odometry error grows with speed (straight 4.5 m corridor:
+# 0.6 cm at 0.16 m/s vs 1.3 cm at 0.24 m/s; practice course max 2.1 vs 4.2 cm),
+# but the Extended benchmark's 71 m waypoint polyline alone needs 444 s at
+# 0.16 m/s against its 420 s limit, so the lower cap cannot complete it.
+STATIC_DWA_MAX_SPEED = DWA_MAX_LINEAR_SPEED
+# While a tracked mover within DWA_CROSSING_DETECTION_DISTANCE approaches the
+# robot, cruise at the legacy nominal path speed: the crossing supervisor's
+# yield/commit distances were tuned for that approach speed (at 0.24 m/s the
+# Extended dynamic-A actor reached the robot's lane before any yield).
+DYNAMIC_CAUTION_SPEED = PRACTICE_PATH_SPEED
+DYNAMIC_CAUTION_MIN_CLOSING_SPEED = 0.05  # m/s towards the robot
+# End-state (inevitable collision) check: a DWA rollout's end point, held
+# stationary, must keep the dynamic margin from every approaching mover of at
+# least this speed for this much longer (constant-velocity prediction).
+DYNAMIC_ANTICIPATION_HOLD_SECONDS = 2.5
+DYNAMIC_ANTICIPATION_MIN_SPEED = 0.10
+STATIC_DWA_PROGRESS_WEIGHT = 4.0
+STATIC_DWA_HEADING_WEIGHT = 0.4
+STATIC_DWA_CLEARANCE_WEIGHT = 0.6
+STATIC_DWA_SPEED_WEIGHT = 0.4
+# Tiny preference for keeping the current turn sign; breaks exact left/right
+# score ties caused by LiDAR noise without overriding a real score difference.
+STATIC_DWA_TURN_HYSTERESIS_WEIGHT = 0.05
+STATIC_DWA_CLEARANCE_SCALE = 0.8  # (clearance - radius) / scale, clipped to [0, 1]
+
+# Local cost-to-go field (scoring aid only; never used as a safety check).
+# Built every frame from the current scan's static points in a world-aligned
+# grid around the robot; unknown space is treated as free.
+NAV_FIELD_RESOLUTION = 0.10
+NAV_FIELD_HALF_EXTENT = 2.5
+NAV_FIELD_INFLATION = DWA_ROBOT_RADIUS + DWA_STATIC_CLEARANCE_MARGIN
+NAV_FIELD_INFLATED_COST = 100.0  # traversal multiplier inside the inflation (last resort)
+NAV_FIELD_ANGLE_BINS = 1440     # shadow-casting resolution seen from the goal
+# Shadowed cells are only resolved inside this radius (rollouts and recovery
+# primitives stay within ~0.6 m of the robot).
+NAV_FIELD_LOCAL_RADIUS = 1.0
+NAV_FIELD_DETOUR_EPSILON = 0.05  # geodesic - euclidean above this => obstacle-shaped route
+# A goal inside the static safety distance is replaced (for the field only)
+# by the nearest admissible point within this radius.
+NAV_FIELD_GOAL_SEARCH_RADIUS = 0.60
+NAV_FIELD_GOAL_EPSILON = 0.003  # projected goal clearance beyond NAV_FIELD_INFLATION
+# Within this distance of the goal the field returns the exact Euclidean
+# distance/direction (interpolation smooths the cone apex).
+NAV_FIELD_NEAR_GOAL = 0.15
+
+# Progress watchdog.  STUCK = no pose progress for the window while the
+# waypoint is outside tolerance.  "Progress" is any of: goal-distance
+# improvement, translation, or a consistent heading change, measured against
+# the pose at the last progress event.  The long window additionally catches
+# small in-place oscillations that keep re-arming the short criterion.
+WATCHDOG_WINDOW_SECONDS = 1.5
+WATCHDOG_MIN_GOAL_IMPROVEMENT = 0.03
+WATCHDOG_MIN_DISPLACEMENT = 0.04
+WATCHDOG_MIN_HEADING_CHANGE = 0.30
+WATCHDOG_GOAL_TOLERANCE = 0.14
+# When the waypoint lies inside the static safety distance the watchdog
+# tracks the nearest admissible point instead, which must really be reached.
+WATCHDOG_PROJECTED_GOAL_TOLERANCE = 0.03
+WATCHDOG_LONG_WINDOW_SECONDS = 6.0
+WATCHDOG_LONG_MIN_GOAL_IMPROVEMENT = 0.10
+WATCHDOG_LONG_MIN_DISPLACEMENT = 0.25
+WATCHDOG_GRACE_SECONDS = 1.0
+WATCHDOG_WAYPOINT_JUMP = 0.30  # goal jump treated as a new waypoint when no id is given
+
+# Dynamic supervisor (avoidance_v2 adapter around the legacy crossing logic).
+# A crossing commit whose command is vetoed by STATIC geometry alone for this
+# long is cancelled: static obstacles never clear, so waiting is a deadlock
+# (seen when a static edge was briefly tracked as a mover).  A commit vetoed
+# because of a moving obstacle keeps waiting exactly as in the legacy logic.
+DYNAMIC_COMMIT_STATIC_BLOCK_SECONDS = 1.0
+# Static-persistence check on the legacy tracker's output.  The tracker
+# estimates velocity from cluster centroids; when a grazing wall end gains and
+# loses a few beams the centroid jumps by several cm and the cluster is tracked
+# as a mover indefinitely (Extended U-turn: 30 s crossing yield in front of a
+# static wall).  A "moving" cluster is handed to the static layer when at least
+# FRACTION of its points lie in world cells that have stayed occupied
+# (dropouts <= DROPOUT) for >= SECONDS.  A real mover's leading cells are
+# always new: for a surface of length L moving at v, only L - v*SECONDS of it
+# can be that old, so a cluster of span <= 0.55 m moving at >= 0.055 m/s is
+# never demoted (the tracker needs >= DWA_DYNAMIC_MIN_SPEED to promote at all).
+DYNAMIC_STATIC_PERSISTENCE_SECONDS = 2.0
+DYNAMIC_STATIC_PERSISTENCE_DROPOUT = 0.30
+DYNAMIC_STATIC_PERSISTENCE_FRACTION = 0.8
+DYNAMIC_STATIC_PERSISTENCE_RESOLUTION = 0.10
+
+# LiDAR artifact filter (avoidance_v2 scan preprocessing).  The Webots 360
+# degree Lidar renders through several virtual camera faces; at the face seams
+# (+-45/+-135 deg) a beam next to a dead (inf) seam beam can report an edge
+# point far too close (practice run: 0.16 m for a corner 0.27 m away).  A
+# return is dropped only when it is closer than the nearest valid neighbour on
+# BOTH sides by LIDAR_SPIKE_GAP and so close that a real object seen by just
+# one beam would be thinner than LIDAR_SPIKE_MIN_OBJECT_WIDTH.
+# TODO(event day): confirm the event LiDAR and that no obstacle is thinner.
+LIDAR_SPIKE_GAP = 0.05
+LIDAR_SPIKE_MIN_OBJECT_WIDTH = 0.02
+
+# Recovery (RECOVERY_BACKOFF -> RECOVERY_COMMIT).  Completion is measured by
+# odometry (distance / heading actually achieved), never by frame counts.
+RECOVERY_BACKOFF_SPEED = 0.10
+RECOVERY_BACKOFF_DISTANCE = 0.12
+RECOVERY_BACKOFF_TIMEOUT = 2.5
+RECOVERY_COMMIT_YAW_RATE = 0.90
+RECOVERY_COMMIT_ANGLE = 0.80  # rad, minimum committed heading change
+RECOVERY_COMMIT_FORWARD_SPEED = 0.10
+RECOVERY_COMMIT_FORWARD_DISTANCE = 0.15  # minimum committed translation after the turn
+RECOVERY_COMMIT_TIMEOUT = 5.0
+RECOVERY_BLOCKED_TIMEOUT = 1.0  # a vetoed committed turn waits at most this long
+# Repeated STUCK near the same place (same waypoint) escalates the committed
+# backoff/turn/forward amounts instead of changing strategy.
+RECOVERY_SITE_RADIUS = 0.35
+RECOVERY_ESCALATION = 0.5
+RECOVERY_MAX_ESCALATION_STEPS = 2
+RECOVERY_DIRECTION_PROGRESS_TIE = 0.05
+RECOVERY_DIRECTION_CLEARANCE_TIE = 0.05
