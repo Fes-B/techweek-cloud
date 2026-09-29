@@ -306,6 +306,22 @@ Planner time per 32 ms step (practice run, nothing else running): v2 mean
 Runs made while other Webots instances were running show max values up to
 0.6 s from CPU contention; those are not representative.
 
+### 3.1 Unlimited-time Extended diagnostic
+
+`tools/run_avoidance_extended.py --unlimited` (`EXTENDED_TIME_LIMIT=unlimited`)
+ignores the official 420 s limit only; contacts and the 35 s stall still end
+the run, and the result goes to its own file.  The official limit is
+unchanged and is the default.
+
+| run | reached | completed | contacts | stalled | timed_out | runtime |
+|---|---|---|---|---|---|---|
+| OFFICIAL (420 s) | 27/39 | false | 1 (wp 27, dynamic C) | false | false | 335.2 s |
+| UNLIMITED DIAGNOSTIC | 27/39 | false | 1 (wp 27, dynamic C) | false | - | 335.2 s |
+
+The two runs are identical: the collision happens before 420 s, so the time
+limit is not what stops the course.  Waypoints 28-38 have not been reached in
+any run yet.
+
 ## 4. Known issues
 
 1. **Extended dynamic C (fast actor, 0.45 m/s, sweeps almost the whole
@@ -333,12 +349,34 @@ Runs made while other Webots instances were running show max values up to
    than 2 cm at < 0.28 m.
 7. All results are from a Linux cloud container; Windows / local Webots
    re-validation is still required.
+8. **Crossing a paused patrol actor (dynamic C) -- root cause analysed, not
+   fixed.**  Reproduced in the 2D harness (1.28 m corridor; actor 0.45 m/s
+   sweeping y in [-0.40, 0.40], 3.5 s dwell; waypoint on its line): v2
+   contact, legacy stall.  Sequence: side-approach retreat, yield, the actor
+   pauses at the far end, the legacy gap test keeps waiting for a *straight*
+   commit that is never safe (the paused actor is 0.26 m from the straight
+   path, dynamic margin 0.32 m), the wait is released only when the track
+   expires, and the robot enters the lane ~1.7 s before the actor resumes.
+   Planned (not implemented) fix: when a departure was observed and the
+   lateral gap/timing tests pass but only the straight commit is unsafe,
+   release the wait to DWA (which keeps the dynamic margin and crosses on the
+   far side) instead of waiting; the legacy commit stays where it is safe.
+9. **DWA heading-term aliasing -- root cause found, fix not validated.**
+   The heading score is `cos(end heading - descent)` at the end of the 2.5 s
+   rollout; at 1.5-1.8 rad/s a rollout turns more than pi, so a spin that
+   wraps a full turn round to the goal scores as aligned (official Extended
+   trace t = 330-334 s: goal on the left, robot kept spinning right for about
+   2*pi next to actor C).  Proposed fix (unit-checked in isolation only):
+   `heading = cos(min(|wrap(descent - theta) - turned|, pi))` with `turned`
+   the rollout's unwrapped rotation.  It was reverted because it has not been
+   through the full regression.
 
 ## 5. How to run
 
 ```
 AVOIDANCE_PLANNER=v2 python tools/run_avoidance_practice.py
 AVOIDANCE_PLANNER=v2 python tools/run_avoidance_extended.py
+AVOIDANCE_PLANNER=v2 python tools/run_avoidance_extended.py --unlimited   # DIAGNOSTIC only
 AVOIDANCE_PLANNER=v2 EXTENDED_DEBUG_WAYPOINT=4 python tools/run_avoidance_extended.py
 EXTENDED_POSE_SOURCE=truth ...          # diagnostic only, never for scoring
 python tools/run_avoidance_scenarios.py --world regression --planner v2
