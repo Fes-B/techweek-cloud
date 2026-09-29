@@ -2,6 +2,7 @@
 
 import json
 import math
+import os
 import sys
 import tempfile
 import time
@@ -21,6 +22,7 @@ from main import (
 )
 from practice_odometry import EncoderPose
 from robot_io import RobotIO
+from tools.avoidance_trace import TraceRecorder
 
 
 WAYPOINTS = (
@@ -55,13 +57,22 @@ STALL_SECONDS = 35.0
 RESULT_PATH = Path(
     tempfile.gettempdir(), "techweek-avoidance-practice-result.json"
 )
+# "legacy": avoidance.DynamicWindowAvoidance + path-follower arbitration.
+# "v2": avoidance_v2.ProgressDWA drives directly (the waypoint is its goal).
+PLANNER = os.environ.get("AVOIDANCE_PLANNER", "legacy")
 
 
 def main():
     print(f"[PYTHON] {sys.version.split()[0]} {sys.executable}", flush=True)
     robot = Supervisor()
     io = RobotIO(robot)
-    planner = DynamicWindowAvoidance(lidar_field_of_view=io.lidar.getFov())
+    if PLANNER == "v2":
+        from avoidance_v2 import ProgressDWA
+        planner = ProgressDWA(lidar_field_of_view=io.lidar.getFov())
+    else:
+        planner = DynamicWindowAvoidance(lidar_field_of_view=io.lidar.getFov())
+    print(f"[PLANNER] {PLANNER}", flush=True)
+    recorder = TraceRecorder.from_env() if PLANNER == "v2" else None
     odometry = EncoderPose(robot, (-4.8, -3.5, 0.0))
     node = robot.getSelf()
     node.enableContactPointsTracking(TIME_STEP, True)
@@ -161,6 +172,7 @@ def main():
                 and expected_flow
             )
             result = {
+                "planner": PLANNER,
                 "completed": passed,
                 "goal_reached": goal_reached,
                 "contacts": contacts,
@@ -196,13 +208,23 @@ def main():
         ranges = io.get_lidar()
         local_goal = goal_in_robot_frame(goal, pose)
         started = time.perf_counter()
-        avoidance_command = planner.choose_action(
-            ranges, local_goal, pose=pose, sim_time=now
-        )
-        nominal_command = nominal_waypoint_command(local_goal)
-        command = select_control_command(
-            planner, nominal_command, avoidance_command
-        )
+        if PLANNER == "v2":
+            avoidance_command = planner.choose_action(
+                ranges, local_goal, pose=pose, sim_time=now,
+                waypoint_id=waypoint_index,
+            )
+            command = (*avoidance_command[:2], planner.control_label)
+            if recorder is not None:
+                recorder.record(now, pose, local_goal, ranges, waypoint_index,
+                                avoidance_command, truth)
+        else:
+            avoidance_command = planner.choose_action(
+                ranges, local_goal, pose=pose, sim_time=now
+            )
+            nominal_command = nominal_waypoint_command(local_goal)
+            command = select_control_command(
+                planner, nominal_command, avoidance_command
+            )
         elapsed = time.perf_counter() - started
         compute_total += elapsed
         compute_max = max(compute_max, elapsed)

@@ -32,6 +32,7 @@ from main import (
 )
 from practice_odometry import EncoderPose
 from robot_io import RobotIO
+from tools.avoidance_trace import TraceRecorder
 
 
 START_POSE = (-9.50, -6.50, 0.0)
@@ -131,6 +132,13 @@ DEBUG_WAYPOINT = int(_debug_wp_env) if _debug_wp_env is not None else None
 RESULT_PATH = Path(
     tempfile.gettempdir(), "techweek-avoidance-extended-result.json"
 )
+# "legacy": avoidance.DynamicWindowAvoidance + path-follower arbitration.
+# "v2": avoidance_v2.ProgressDWA drives directly (the waypoint is its goal).
+PLANNER = os.environ.get("AVOIDANCE_PLANNER", "legacy")
+# DIAGNOSTIC ONLY: "truth" feeds the Supervisor pose to the planner and the
+# waypoint check instead of encoder/compass odometry, to separate avoidance
+# behaviour from odometry drift.  Official benchmark runs use "odometry".
+POSE_SOURCE = os.environ.get("EXTENDED_POSE_SOURCE", "odometry")
 
 
 def scenario_index_for_waypoint(waypoint_index):
@@ -155,7 +163,13 @@ def main():
     print(f"[LAPS] total_laps={TOTAL_LAPS}", flush=True)
     robot = Supervisor()
     io = RobotIO(robot)
-    planner = DynamicWindowAvoidance(lidar_field_of_view=io.lidar.getFov())
+    if PLANNER == "v2":
+        from avoidance_v2 import ProgressDWA
+        planner = ProgressDWA(lidar_field_of_view=io.lidar.getFov())
+    else:
+        planner = DynamicWindowAvoidance(lidar_field_of_view=io.lidar.getFov())
+    print(f"[PLANNER] {PLANNER}", flush=True)
+    recorder = TraceRecorder.from_env() if PLANNER == "v2" else None
     odometry = EncoderPose(robot, START_POSE)
     node = robot.getSelf()
     node.enableContactPointsTracking(TIME_STEP, True)
@@ -181,6 +195,19 @@ def main():
     debug_switch_count = 0
 
     frame_counts = {"path_follow": 0, "avoidance_override": 0, "recovery": 0, "stop": 0}
+    max_position_error = 0.0
+    compute_total = 0.0
+    compute_max = 0.0
+    compute_steps = 0
+    # Per-waypoint diagnostics (v2 fields stay None for the legacy planner).
+    waypoint_stats = [
+        {"index": index, "role": role, "seconds": 0.0, "recoveries": 0,
+         "max_no_progress_s": 0.0, "min_clearance": None, "contacts": 0,
+         "min_displacement_1s": None, "reached": False, "odometry_error": None}
+        for index, role in enumerate(WAYPOINT_ROLES)
+    ]
+    recovery_seen = planner.recovery_count if PLANNER == "v2" else 0
+    pose_history = []
     crossing_yield_count = 0
     crossing_gap_count = 0
     crossing_commit_count = 0
@@ -219,6 +246,10 @@ def main():
             math.atan2(orientation[3], orientation[0]),
         )
         pose = odometry.update()
+        position_error = math.dist(pose[:2], truth[:2])
+        max_position_error = max(max_position_error, position_error)
+        if POSE_SOURCE == "truth":
+            pose = truth
 
         if waypoint_index < len(WAYPOINTS):
             distance = math.dist(pose[:2], WAYPOINTS[waypoint_index])
@@ -233,6 +264,8 @@ def main():
                     if last_idx == waypoint_index:
                         scenario_stats[scenario_i]["passed"] = True
                         scenario_stats[scenario_i]["pass_time"] = now
+                waypoint_stats[waypoint_index]["reached"] = True
+                waypoint_stats[waypoint_index]["odometry_error"] = position_error
                 waypoint_index += 1
                 best_distance = float("inf")
                 progress_time = now
@@ -264,6 +297,8 @@ def main():
             print(f"[CONTACT] t={now:.2f} pose={pose}", flush=True)
             if active_scenario_i is not None:
                 scenario_stats[active_scenario_i]["contacts"] += 1
+            if waypoint_index < len(WAYPOINTS):
+                waypoint_stats[waypoint_index]["contacts"] += 1
         touching = contact_now
 
         if waypoint_index < len(WAYPOINTS):
@@ -287,7 +322,12 @@ def main():
                 and not timed_out
                 and scenario_passed == len(SCENARIOS)
             )
+            if waypoint_index < len(WAYPOINTS):
+                waypoint_stats[waypoint_index]["odometry_error"] = position_error
             result = {
+                "planner": PLANNER,
+                "pose_source": POSE_SOURCE,
+                "max_position_error": max_position_error,
                 "completed": passed,
                 "goal_reached": goal_reached,
                 "contacts": contacts,
@@ -313,6 +353,13 @@ def main():
                 "dynamic_tracks_detected": dynamic_tracks_detected,
                 "max_continuous_stop_seconds": max_stop_seconds,
                 "max_recovery_seconds": max_recovery_seconds,
+                "planner_mean_ms": 1000.0 * compute_total / max(1, compute_steps),
+                "planner_max_ms": 1000.0 * compute_max,
+                "recovery_count": planner.recovery_count if PLANNER == "v2" else None,
+                "stopped_waypoint": (
+                    None if waypoint_index >= len(WAYPOINTS) else waypoint_index
+                ),
+                "waypoint_stats": waypoint_stats,
                 "scenarios": [
                     {
                         "name": stat["name"],
@@ -337,19 +384,101 @@ def main():
         goal = WAYPOINTS[waypoint_index]
         ranges = io.get_lidar()
         local_goal = goal_in_robot_frame(goal, pose)
-        avoidance_command = planner.choose_action(
-            ranges, local_goal, pose=pose, sim_time=now
-        )
-        nominal_command = nominal_waypoint_command(local_goal)
-        command = select_control_command(
-            planner, nominal_command, avoidance_command
-        )
+        started = time.perf_counter()
+        if PLANNER == "v2":
+            avoidance_command = planner.choose_action(
+                ranges, local_goal, pose=pose, sim_time=now,
+                waypoint_id=(current_lap, waypoint_index),
+            )
+            nominal_command = None
+            command = (*avoidance_command[:2], planner.control_label)
+            if recorder is not None:
+                recorder.record(now, pose, local_goal, ranges, (current_lap, waypoint_index),
+                                avoidance_command, truth)
+        else:
+            avoidance_command = planner.choose_action(
+                ranges, local_goal, pose=pose, sim_time=now
+            )
+            nominal_command = nominal_waypoint_command(local_goal)
+            command = select_control_command(
+                planner, nominal_command, avoidance_command
+            )
+        elapsed = time.perf_counter() - started
+        compute_total += elapsed
+        compute_max = max(compute_max, elapsed)
+        compute_steps += 1
 
         left, right, control = command
         io.set_wheel_speed(left, right)
         action = avoidance_command[2]
 
-        if DEBUG_WAYPOINT is not None and waypoint_index == DEBUG_WAYPOINT:
+        stat = waypoint_stats[waypoint_index]
+        stat["seconds"] += TIME_STEP / 1000.0
+        pose_history.append((now, pose[0], pose[1]))
+        while pose_history and now - pose_history[0][0] > 1.0:
+            pose_history.pop(0)
+        if len(pose_history) > 1 and now - pose_history[0][0] >= 0.99:
+            moved = math.dist(pose_history[0][1:], pose_history[-1][1:])
+            if stat["min_displacement_1s"] is None or moved < stat["min_displacement_1s"]:
+                stat["min_displacement_1s"] = moved
+        obstacle_clearance = min(
+            (math.hypot(point[0], point[1]) for point in (planner.last_obstacles or ())
+             if len(point) == 2),
+            default=None,
+        )
+        if obstacle_clearance is not None and (
+            stat["min_clearance"] is None or obstacle_clearance < stat["min_clearance"]
+        ):
+            stat["min_clearance"] = obstacle_clearance
+        if PLANNER == "v2":
+            stat["max_no_progress_s"] = max(
+                stat["max_no_progress_s"], planner.watchdog.no_progress_seconds
+            )
+            if planner.recovery_count > recovery_seen:
+                stat["recoveries"] += planner.recovery_count - recovery_seen
+                recovery_seen = planner.recovery_count
+                attempt = planner.recovery
+                print(
+                    f"[RECOVERY] t={now:.2f} wp={waypoint_index} attempt={planner.recovery_count} "
+                    f"state={planner.state.value} "
+                    f"sign={attempt.sign if attempt else None} "
+                    f"site_attempt={attempt.site_attempt if attempt else None} "
+                    f"pose=({pose[0]:.3f},{pose[1]:.3f},{pose[2]:.3f})",
+                    flush=True,
+                )
+
+        if PLANNER == "v2" and DEBUG_WAYPOINT is not None and waypoint_index == DEBUG_WAYPOINT:
+            diagnostics = planner.diagnostics
+            dwa = diagnostics.get("dwa") or {}
+            best = dwa.get("best") or {}
+            recovery = diagnostics.get("recovery") or {}
+            watchdog = diagnostics.get("watchdog") or {}
+            moved_1s = (math.dist(pose_history[0][1:], pose_history[-1][1:])
+                        if len(pose_history) > 1 else 0.0)
+            print(
+                f"[DBG2] t={now:.3f} wp={waypoint_index} "
+                f"pose=({pose[0]:.4f},{pose[1]:.4f},{pose[2]:.3f}) "
+                f"wp_dist={math.dist(pose[:2], goal):.4f} moved_1s={moved_1s:.4f} "
+                f"state={diagnostics.get('state')} layer={diagnostics.get('layer')} "
+                f"watchdog_no_progress={watchdog.get('no_progress_s')} "
+                f"watchdog_long={watchdog.get('long_no_progress_s')} "
+                f"grace={watchdog.get('grace_s')} stuck={watchdog.get('stuck_reason')} "
+                f"current_vw=({planner.current_v:.4f},{planner.current_w:.4f}) "
+                f"v_window={dwa.get('v_window')} w_window={dwa.get('w_window')} "
+                f"admissible={dwa.get('admissible')}/{dwa.get('candidates')} "
+                f"forward_admissible={dwa.get('forward_admissible')} "
+                f"selected=({best.get('v')},{best.get('w')}) "
+                f"best_clearance={best.get('clearance')} "
+                f"recovery_attempt={recovery.get('attempt')} sign={recovery.get('sign')} "
+                f"segment={recovery.get('segment')} "
+                f"backoff={recovery.get('backoff_travelled')} "
+                f"turned={recovery.get('turned')} forward={recovery.get('forward_travelled')} "
+                f"cost_to_go={diagnostics.get('cost_to_go')} detour={diagnostics.get('detour')} "
+                f"spikes={diagnostics.get('lidar_spikes')} contacts={contacts} "
+                f"final=({left:.2f},{right:.2f}) action={action}",
+                flush=True,
+            )
+        if PLANNER != "v2" and DEBUG_WAYPOINT is not None and waypoint_index == DEBUG_WAYPOINT:
             static_n = sum(1 for o in planner.last_obstacles or () if len(o) == 2)
             dyn_n = sum(1 for o in planner.last_obstacles or () if len(o) == 4)
             front_distance = planner._front_distance(ranges)

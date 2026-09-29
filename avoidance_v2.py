@@ -25,7 +25,9 @@ replaces its static behaviour with a single explicit state machine::
 Dynamic obstacles are handled by :class:`DynamicSupervisor`, an orthogonal
 layer.  It may override a frame (yield, crossing commit, imminent retreat) and
 it pauses the watchdog and recovery clocks, but it never changes the static
-state.  Every command from every layer passes the same final safety veto.
+state.  Every command from every layer passes the same final safety veto;
+the one exception (``_emit``) is a dynamic-layer command that still passes the
+static part of the veto while STOP itself is predicted to be hit by a mover.
 
 Coordinates: pose is world ``(x, y, theta)`` in metres/radians; ``goal`` is the
 path waypoint in robot coordinates (+x forward, +y left).  Wheel speeds are in
