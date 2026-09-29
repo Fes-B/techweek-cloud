@@ -97,7 +97,7 @@ def _describe(frame, planner, avoidance, selected):
         if not candidate:
             return "-"
         keys = ("v", "w", "score", "goal_distance", "heading", "clearance",
-                "headroom", "static_clearance")
+                "headroom", "side", "static_clearance")
         return " ".join(
             f"{key}={candidate[key]:.3f}" for key in keys
             if isinstance(candidate.get(key), float)

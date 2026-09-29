@@ -140,6 +140,7 @@ def main():
                 "reached_waypoints": index,
                 "total_waypoints": len(waypoints),
                 "recovery_entries": recovery_entries,
+                "detours": getattr(planner, "detour_count", 0),
                 "max_turn_flips": max_flips,
                 "oscillation_events": oscillation_events,
                 "min_lidar_clearance": round(min_clearance, 3),
@@ -175,7 +176,7 @@ def main():
         recovering = (
             planner.recovery_phase is not None
             or planner.backoff_steps > 0
-            or planner._front_corner_escape_active
+            or getattr(planner, "_front_corner_escape_active", False)
         )
         if recovering and not in_recovery:
             recovery_entries += 1

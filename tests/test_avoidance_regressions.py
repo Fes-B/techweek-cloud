@@ -16,9 +16,14 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
-from avoidance import DynamicWindowAvoidance, _FORWARD_SPEED_THRESHOLD
+from avoidance import (
+    DynamicWindowAvoidance,
+    _EPISODE_SIDE_SWITCH_FRAMES,
+    _FORWARD_SPEED_THRESHOLD,
+)
 from config import (
     DWA_BACKOFF_TRIGGER_DISTANCE,
+    DWA_PROGRESS_TIMEOUT,
     DWA_IDLE_PENALTY,
     DWA_LINEAR_ACCELERATION,
     DWA_PATH_RELEASE_CONFIRM_STEPS,
@@ -165,13 +170,15 @@ class TestHeadroomAndGoalCaps(unittest.TestCase):
 class TestRecoveryAndRelease(unittest.TestCase):
     def test_recovery_escape_latches_until_the_front_arc_clears(self):
         planner = DynamicWindowAvoidance()
-        planner._leave_recovery_for_dwa()
         box = (0.62, 0.0, 0.45, 0.45)  # front at ~0.40 m (< recovery trigger)
         scan = lidar_scan((0.0, 0.0, 0.0), box)
-        planner.choose_action(scan, (3.0, -0.8), (0.0, 0.0, 0.0), 0.0)
+        # Present the goal first: an episode latch belongs to its goal.
+        planner.choose_action([float("inf")] * 180, (3.0, -0.8), (0.0, 0.0, 0.0), 0.0)
+        planner._leave_recovery_for_dwa()
+        planner.choose_action(scan, (3.0, -0.8), (0.0, 0.0, 0.0), DT)
         self.assertIsNone(planner.recovery_phase)
         self.assertTrue(planner._recovery_reentry_latched)
-        planner.choose_action([float("inf")] * 180, (3.0, -0.8), (0.0, 0.0, 0.0), DT)
+        planner.choose_action([float("inf")] * 180, (3.0, -0.8), (0.0, 0.0, 0.0), 2 * DT)
         self.assertFalse(planner._recovery_reentry_latched)
 
     def test_release_waits_until_the_goal_line_clears_the_obstacle(self):
@@ -220,6 +227,95 @@ class TestRecoveryAndRelease(unittest.TestCase):
         stops = sum(1 for left, right, _ in results if left == 0.0 and right == 0.0)
         self.assertLess(stops, len(results))
         self.assertEqual(0, planner.backoff_steps)
+
+
+class TestLocalMinimumDetour(unittest.TestCase):
+    def test_tangent_side_prefers_the_nearer_gap_and_is_mirrored(self):
+        planner = DynamicWindowAvoidance()
+        gap_left = lidar_scan((0.0, 0.0, 0.0), (0.6, -0.3, 0.10, 1.2))
+        gap_right = lidar_scan((0.0, 0.0, 0.0), (0.6, 0.3, 0.10, 1.2))
+        self.assertEqual(1.0, planner._detour_side_toward_goal(gap_left, (3.0, 0.0)))
+        self.assertEqual(-1.0, planner._detour_side_toward_goal(gap_right, (3.0, 0.0)))
+        centred = lidar_scan((0.0, 0.0, 0.0), (0.6, 0.0, 0.10, 1.2))
+        self.assertIsNone(planner._detour_side_toward_goal(centred, (3.0, 0.0)))
+
+    def test_watchdog_needs_pose_progress_and_ignores_crossing_waits(self):
+        planner = DynamicWindowAvoidance()
+        pose, goal = (0.0, 0.0, 0.0), (2.0, 0.0)
+        self.assertFalse(planner._update_progress_watchdog(goal, pose, 0.0))
+        self.assertFalse(planner._update_progress_watchdog(goal, pose, DWA_PROGRESS_TIMEOUT - 0.1))
+        self.assertTrue(planner._update_progress_watchdog(goal, pose, DWA_PROGRESS_TIMEOUT + 0.1))
+        planner.crossing_waiting = True
+        self.assertFalse(planner._update_progress_watchdog(goal, pose, DWA_PROGRESS_TIMEOUT + 0.2))
+        planner.crossing_waiting = False
+        self.assertFalse(planner._update_progress_watchdog(goal, pose, DWA_PROGRESS_TIMEOUT + 1.0))
+
+    def test_crossing_wait_restarts_the_watchdog_through_choose_action(self):
+        # The crossing branch returns early; the watchdog must still see the
+        # wait, or a detour starts the moment the wait ends.
+        planner = DynamicWindowAvoidance()
+        pose, goal = (0.0, 0.0, 0.0), (2.0, 0.0)
+        planner.choose_action([float("inf")] * 180, goal, pose, 0.0)
+        planner.crossing_waiting = True
+        planner._evaluate_crossing_hazard = lambda *args, **kwargs: (0.0, 0.0, "wait")
+        planner.choose_action([float("inf")] * 180, goal, pose, DWA_PROGRESS_TIMEOUT + 5.0)
+        self.assertEqual(DWA_PROGRESS_TIMEOUT + 5.0, planner._progress_time)
+        self.assertFalse(planner._detour_active)
+
+    def test_watchdog_restarts_for_a_new_waypoint(self):
+        planner = DynamicWindowAvoidance()
+        pose = (0.0, 0.0, 0.0)
+        planner._update_progress_watchdog((2.0, 0.0), pose, 0.0)
+        self.assertFalse(planner._update_progress_watchdog((0.0, 2.0), pose, 20.0))
+
+    def test_detour_holds_control_until_its_leave_condition(self):
+        planner = DynamicWindowAvoidance()
+        wall = lidar_scan((0.0, 0.0, 0.0), (0.6, -0.3, 0.10, 1.2))
+        planner.choose_action(wall, (3.0, 0.0), (0.0, 0.0, 0.0), 0.0)
+        planner._start_detour(wall, (3.0, 0.0), 0.0)
+        self.assertEqual("wall_follow", planner.recovery_phase)
+        self.assertEqual("right", planner.wall_side)  # turning left, wall on the right
+        for _ in range(DWA_PATH_RELEASE_CONFIRM_STEPS + 2):
+            self.assertFalse(planner.is_release_ready(3.0, 3.0))
+        self.assertFalse(planner._detour_leave_ready((3.0, 0.0)))
+
+    def test_latched_episode_side_switches_only_after_hysteresis(self):
+        planner = DynamicWindowAvoidance()
+        gap_right = lidar_scan((0.0, 0.0, 0.0), (0.6, 0.3, 0.10, 1.2))
+        planner._recovery_reentry_latched = True
+        planner._episode_side = 1.0
+        for _ in range(_EPISODE_SIDE_SWITCH_FRAMES - 1):
+            planner._update_episode_side(gap_right, (3.0, 0.0))
+        self.assertEqual(1.0, planner._episode_side)
+        planner._update_episode_side(gap_right, (3.0, 0.0))
+        self.assertEqual(-1.0, planner._episode_side)
+
+
+class TestStoppedMover(unittest.TestCase):
+    def test_wait_holds_while_a_stopped_mover_sits_beside_the_path(self):
+        planner = DynamicWindowAvoidance()
+        planner.crossing_waiting = True
+        beside = [(0.40, 0.45), (0.45, 0.45), (0.50, 0.45)]  # stopped body
+        action = planner._evaluate_crossing_hazard([], float("inf"), beside, None, 10.0)
+        self.assertEqual((0.0, 0.0), action[:2])
+        self.assertTrue(planner.crossing_waiting)
+        released = planner._evaluate_crossing_hazard([], float("inf"), beside, None, 25.0)
+        self.assertIsNone(released)  # bounded wait
+        self.assertFalse(planner.crossing_waiting)
+
+    def test_path_follower_is_not_released_during_a_crossing_wait(self):
+        planner = DynamicWindowAvoidance()
+        planner.choose_action([float("inf")] * 180, (2.0, 0.0), (0.0, 0.0, 0.0), 0.0)
+        planner.crossing_waiting = True
+        for _ in range(DWA_PATH_RELEASE_CONFIRM_STEPS + 2):
+            self.assertFalse(planner.is_release_ready(3.0, 3.0))
+
+    def test_wait_releases_when_the_mover_stopped_far_from_the_path(self):
+        planner = DynamicWindowAvoidance()
+        planner.crossing_waiting = True
+        far = [(0.40, 1.40), (0.45, 1.40)]
+        self.assertIsNone(planner._evaluate_crossing_hazard([], float("inf"), far, None, 10.0))
+        self.assertFalse(planner.crossing_waiting)
 
 
 class TestTranslationPhantom(unittest.TestCase):

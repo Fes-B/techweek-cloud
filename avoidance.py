@@ -47,6 +47,11 @@ from config import (
     DWA_SIDE_STOP_DISTANCE,
     DWA_SIDE_YIELD_SECONDS,
     DWA_SPEED_WEIGHT,
+    DWA_PROGRESS_TIMEOUT,
+    DWA_PROGRESS_MIN_IMPROVEMENT,
+    DWA_DETOUR_MAX_SECONDS,
+    DWA_DETOUR_LEAVE_MARGIN,
+    DWA_EPISODE_SIDE_WEIGHT,
     DWA_GOAL_REACHED_DISTANCE,
     DWA_IDLE_HEADING_TOLERANCE,
     DWA_IDLE_PENALTY,
@@ -122,6 +127,22 @@ _MOTION_EVIDENCE_MIN_FRACTION = 0.15
 # _reject_isolated_body_returns).
 _ISOLATED_RETURN_GAP = 0.10
 
+# A crossing wait whose mover stopped being tracked keeps waiting while static
+# returns remain this close (laterally) to the robot's path inside the
+# crossing zone -- a mover dwelling at the end of its lane -- for at most
+# _STOPPED_MOVER_MAX_WAIT_SECONDS.  The band spans the lane half width plus a
+# 0.30 m allowance for the stopped body beside it.
+_STOPPED_MOVER_BAND_HALF_WIDTH = 0.55
+_STOPPED_MOVER_MAX_WAIT_SECONDS = 10.0
+
+# Consecutive frames the goal-relative blocker side must disagree before a
+# latched avoidance episode switches the side it prefers (~0.5 s).
+_EPISODE_SIDE_SWITCH_FRAMES = 15
+
+# The tangent side choice needs one side to open at least this many rays
+# (2 degrees each on the practice LiDAR) closer to the goal bearing.
+_TANGENT_SIDE_MIN_RAYS = 3
+
 # Include obstacles that can move into the robot's path during the prediction horizon.
 _SCAN_RELEVANT_DISTANCE = (
     (DWA_MAX_LINEAR_SPEED + DWA_DYNAMIC_MAX_SPEED) * DWA_HORIZON
@@ -180,6 +201,17 @@ class DynamicWindowAvoidance:
         self._wall_escape_cooldown = 0.0
         self._recovery_escape_streak = 0
         self._recovery_reentry_latched = False
+        self._episode_side = None
+        self._episode_side_disagree = 0
+        self._last_ranges = None
+        self._progress_goal_world = None
+        self._progress_best = float("inf")
+        self._progress_time = None
+        self._detour_active = False
+        self._detour_start_distance = None
+        self._detour_start_time = None
+        self._detour_next_sign = None
+        self.detour_count = 0
         self.last_dynamic_obstacles = []
         self.last_obstacles = None
         self._rollout_cache = None
@@ -190,6 +222,7 @@ class DynamicWindowAvoidance:
         self.crossing_commit_last_pose = None
         self.crossing_departure_observed = False
         self._crossing_exit_distance = DWA_CROSSING_COMMIT_MIN_DISTANCE
+        self._crossing_mover_lost_time = None
         # Start "already released" so a path that was never interrupted
         # incurs no delay; only an actual unsafe frame resets this to zero,
         # after which DWA_PATH_RELEASE_CONFIRM_STEPS consecutive safe frames
@@ -277,10 +310,11 @@ class DynamicWindowAvoidance:
         return turn_sign
 
     def _recovery_turn(self, ranges):
-        if self._front_corner_escape_active:
+        if self._front_corner_escape_active or self._recovery_reentry_latched:
             # Sector membership changes during an in-place turn even though
             # the obstacle has not moved.  Keep the escape direction fixed
-            # until translation clears the latched corner episode.
+            # until translation clears the latched corner episode (or, for a
+            # latched recovery episode, until the front arc has cleared).
             if self.recovery_turn_sign is None:
                 self.recovery_turn_sign = self._select_turn_sign(ranges)
         else:
@@ -370,8 +404,11 @@ class DynamicWindowAvoidance:
                 self.wall_side = "left" if left_distance < right_distance else "right"
 
         # If the followed wall disappears and the opposite side becomes close,
-        # update the wall side before choosing a turn away from it.
-        if (
+        # update the wall side before choosing a turn away from it.  A detour
+        # keeps one hand on the same wall instead (see _start_detour).
+        if self._detour_active:
+            pass
+        elif (
             self.wall_side == "left"
             and left_distance > DWA_WALL_LOST_DISTANCE
             and right_distance < DWA_WALL_FOLLOW_DISTANCE
@@ -407,8 +444,10 @@ class DynamicWindowAvoidance:
         if front_arc_distance is None:
             front_arc_distance = self._front_arc_distance(ranges)
         if front_arc_distance < DWA_RECOVERY_CLEAR_DISTANCE:
-            self.wall_front_turn_sign = self._update_turn_sign(
-                ranges, self.wall_front_turn_sign
+            self.wall_front_turn_sign = (
+                away_sign
+                if self._detour_active
+                else self._update_turn_sign(ranges, self.wall_front_turn_sign)
             )
             self.last_turn_sign = self.wall_front_turn_sign
             self.current_v = min(DWA_WALL_FOLLOW_SPEED, self.side_speed_limit)
@@ -418,6 +457,14 @@ class DynamicWindowAvoidance:
             left, right = self._wheel_speeds(self.current_v, self.current_w)
             return left, right, "DWA 벽 추종 - 저속 전진 회피"
         self.wall_front_turn_sign = None
+
+        if self._detour_active and side_distance > DWA_WALL_LOST_DISTANCE:
+            # Wrap around the end of the followed boundary (Bug-style)
+            # instead of releasing; the detour ends on its leave condition.
+            self.current_v = min(DWA_WALL_FOLLOW_SPEED, self.side_speed_limit)
+            self.current_w = -away_sign * DWA_WALL_FOLLOW_TURN_RATE
+            left, right = self._wheel_speeds(self.current_v, self.current_w)
+            return left, right, f"DWA 벽 추종 - {self.wall_side} 모서리 회전"
 
         if side_distance > DWA_WALL_LOST_DISTANCE:
             self.wall_clear_steps += 1
@@ -1011,6 +1058,11 @@ class DynamicWindowAvoidance:
             or self._last_rollout_had_no_safe_candidate
             or self._wall_escape_cooldown > 0.0
             or self._front_corner_escape_active
+            or self._detour_active
+            # Yielding to a crossing is a deliberate stop: a stationary actor
+            # beside the path leaves the nominal command "safe" for a frame,
+            # and releasing then drove the robot into the actor's lane.
+            or self.crossing_waiting
         )
         if (
             active_recovery
@@ -1126,22 +1178,40 @@ class DynamicWindowAvoidance:
         return 0.0, 0.0, unsafe_message
 
     @staticmethod
-    def _sensor_clearances(trajectories, fixed, moving):
-        """Evaluate the same collision model for all candidates in one batch."""
+    def _sensor_clearances(trajectories, fixed, moving, paths=None,
+                           with_horizon=False):
+        """Evaluate the same collision model for all candidates in one batch.
+
+        With ``with_horizon`` a third array holds each rollout's static
+        clearance over the whole DWA horizon (scoring only, see
+        _static_headroom_term); it reuses the same distance tensor as the
+        1.2 s safety clearance.  ``paths`` may pass the cached (C, S, 2)
+        position array of ``trajectories``.
+        """
         near_steps = max(1, round(1.2 / DWA_SIMULATION_STEP))
         if np is None:
-            return (
-                [DynamicWindowAvoidance._trajectory_clearance(t[:near_steps], fixed)
-                 for t in trajectories],
-                [DynamicWindowAvoidance._dynamic_reachable_clearance(t, moving)
-                 for t in trajectories],
-            )
-        paths = np.asarray(trajectories, dtype=float)[:, :, :2]
+            static = [DynamicWindowAvoidance._trajectory_clearance(t[:near_steps], fixed)
+                      for t in trajectories]
+            dynamic = [DynamicWindowAvoidance._dynamic_reachable_clearance(t, moving)
+                       for t in trajectories]
+            if not with_horizon:
+                return static, dynamic
+            horizon = [DynamicWindowAvoidance._trajectory_clearance(t, fixed)
+                       for t in trajectories]
+            return static, dynamic, horizon
+        if paths is None:
+            paths = np.asarray(trajectories, dtype=float)[:, :, :2]
         static = np.full(len(paths), np.inf)
         dynamic = np.full(len(paths), np.inf)
+        horizon = np.full(len(paths), np.inf)
         if fixed:
-            delta = paths[:, :near_steps, None, :] - np.asarray(fixed)[None, None, :, :2]
-            static = np.hypot(delta[..., 0], delta[..., 1]).min(axis=(1, 2))
+            points = np.asarray(fixed, dtype=float)[:, :2]
+            steps = paths.shape[1] if with_horizon else near_steps
+            delta = paths[:, :steps, None, :] - points[None, None, :, :]
+            step_minimum = (delta[..., 0] ** 2 + delta[..., 1] ** 2).min(axis=2)
+            static = np.sqrt(step_minimum[:, :near_steps].min(axis=1))
+            if with_horizon:
+                horizon = np.sqrt(step_minimum.min(axis=1))
         if moving:
             steps = min(paths.shape[1], int(1.2 / DWA_SIMULATION_STEP))
             times = np.arange(1, steps + 1) * DWA_SIMULATION_STEP
@@ -1154,6 +1224,8 @@ class DynamicWindowAvoidance:
             distance = np.minimum(distance, current_distance)
             distance -= (0.5 * DWA_DYNAMIC_ACCELERATION_BOUND * times**2)[None, :, None]
             dynamic = distance.min(axis=(1, 2))
+        if with_horizon:
+            return static, dynamic, horizon
         return static, dynamic
 
     @staticmethod
@@ -1182,26 +1254,6 @@ class DynamicWindowAvoidance:
             + DWA_SPEED_WEIGHT * speed_score
             + DWA_PROGRESS_WEIGHT * progress_score
         )
-
-    @staticmethod
-    def _horizon_static_clearances(trajectories, fixed):
-        """Static clearance of each rollout over the whole DWA horizon.
-
-        The safety filter deliberately looks only 1.2 s ahead.  At the slow
-        speeds used near obstacles that is ~0.1 m, so a candidate that bends
-        back toward the goal around a corner is judged safe right up to the
-        frame where every forward candidate collides.  Scoring the full
-        rollout exposes that doomed future early, while the admissibility
-        test itself is left unchanged.
-        """
-        if not fixed:
-            return [float("inf")] * len(trajectories)
-        if np is None:
-            return [DynamicWindowAvoidance._trajectory_clearance(t, fixed)
-                    for t in trajectories]
-        paths = np.asarray(trajectories, dtype=float)[:, :, :2]
-        delta = paths[:, :, None, :] - np.asarray(fixed)[None, None, :, :2]
-        return np.hypot(delta[..., 0], delta[..., 1]).min(axis=(1, 2))
 
     @staticmethod
     def _goal_approach_clearance(goal, fixed):
@@ -1313,6 +1365,154 @@ class DynamicWindowAvoidance:
             ),
         }
 
+    def _update_progress_watchdog(self, goal, pose, sim_time):
+        """Track pose-based progress toward the current local goal.
+
+        Returns True when the robot has not reduced its distance to the
+        goal by DWA_PROGRESS_MIN_IMPROVEMENT for DWA_PROGRESS_TIMEOUT seconds.
+        The timer restarts whenever the goal (in world coordinates) changes,
+        and it is frozen while a dynamic crossing is being yielded to or
+        committed, so waiting for a mover never counts as being stuck.
+        """
+        x, y, heading = pose
+        cosine, sine = math.cos(heading), math.sin(heading)
+        goal_world = (x + cosine * goal[0] - sine * goal[1],
+                      y + sine * goal[0] + cosine * goal[1])
+        distance = math.hypot(goal[0], goal[1])
+        if (
+            self._progress_goal_world is None
+            or math.dist(goal_world, self._progress_goal_world) > 0.25
+        ):
+            self._progress_goal_world = goal_world
+            self._progress_best = distance
+            self._progress_time = sim_time
+            self._detour_next_sign = None
+            if self._detour_active:
+                self._end_detour(sim_time)
+            # An avoidance episode belongs to the goal it was avoiding for;
+            # carrying its side into the next waypoint spun the robot the
+            # long way round at corners.
+            self._recovery_reentry_latched = False
+            self._episode_side = None
+            self._episode_side_disagree = 0
+            return False
+        if (
+            distance < self._progress_best - DWA_PROGRESS_MIN_IMPROVEMENT
+            or self.crossing_waiting
+            or self.crossing_commit_active
+            or distance <= DWA_GOAL_REACHED_DISTANCE
+        ):
+            self._progress_best = min(self._progress_best, distance)
+            self._progress_time = sim_time
+            return False
+        return sim_time - self._progress_time > DWA_PROGRESS_TIMEOUT
+
+    @staticmethod
+    def _open_side_sign(ranges, cap=2.0):
+        """+1 when the left half of the forward hemisphere is more open."""
+        count = len(ranges)
+        quarter = count // 4
+        center = count // 2
+
+        def openness(offsets):
+            values = [ranges[(center + offset) % count] for offset in offsets]
+            return sum(min(cap, value) if math.isfinite(value) else cap
+                       for value in values) / max(1, len(values))
+
+        left = openness(range(1, quarter + 1))
+        right = openness(range(-quarter, 0))
+        if abs(left - right) < 0.05:
+            return None
+        return 1.0 if left > right else -1.0
+
+    def _detour_side_toward_goal(self, ranges, goal):
+        """Side whose first free ray is angularly closest to the goal.
+
+        Tangent-bug style choice of the shorter way around the obstacle that
+        blocks the goal: sweep outward from the goal bearing on both sides and
+        return +1 (left) or -1 (right) for the side that opens first, or None
+        when both open within _TANGENT_SIDE_MIN_RAYS of each other.
+        """
+        count = len(ranges)
+        step = self._beam_angle_step(self.lidar_field_of_view, count)
+        if count < 4 or step <= 0.0:
+            return None
+        bearing = math.atan2(goal[1], goal[0])
+        center = round((bearing + 0.5 * self.lidar_field_of_view) / step) % count
+        needed = min(math.hypot(goal[0], goal[1]), 1.5)
+
+        def free(index):
+            value = ranges[index % count]
+            return not math.isfinite(value) or value >= needed
+
+        # A usable opening must be wide enough for the collision radius plus
+        # static margin at that distance; this also ignores single dropped
+        # rays (Webots software-GL LiDAR drops rays at its view seams).
+        width = max(1, math.ceil(
+            2.0 * math.atan2(DWA_ROBOT_RADIUS + DWA_STATIC_CLEARANCE_MARGIN, needed)
+            / step
+        ))
+
+        def first_free(direction):
+            for offset in range(1, count // 2):
+                if all(free(center + direction * (offset + extra))
+                       for extra in range(width)):
+                    return offset
+            return None
+
+        left = first_free(1)
+        right = first_free(-1)
+        if left is None and right is None:
+            return None
+        if right is None:
+            return 1.0
+        if left is None:
+            return -1.0
+        # Near-symmetric blockers (a few rays apart) are ties: a centimetre
+        # of translation must not decide, or flip, the way around.
+        if abs(left - right) < _TANGENT_SIDE_MIN_RAYS:
+            return None
+        return 1.0 if left < right else -1.0
+
+    def _start_detour(self, ranges, goal, sim_time):
+        """Enter wall-follow as a committed detour around a local minimum."""
+        goal_distance = math.hypot(goal[0], goal[1])
+        sign = self._detour_next_sign
+        if sign is None:
+            sign = (
+                self._detour_side_toward_goal(ranges, goal)
+                or self._open_side_sign(ranges)
+                or self._select_turn_sign(ranges)
+            )
+        self._detour_active = True
+        self._detour_start_distance = goal_distance
+        self._detour_start_time = sim_time
+        self._detour_next_sign = -sign  # used if this detour times out
+        self.detour_count += 1
+        self.recovery_phase = "wall_follow"
+        self.recovery_turn_sign = sign
+        # Turning toward +sign keeps the obstacle on the opposite side.
+        self.wall_side = "right" if sign > 0.0 else "left"
+        self.wall_clear_steps = 0
+        self.wall_escape_active = False
+        self.wall_front_turn_sign = None
+        self._recovery_escape_streak = 0
+
+    def _end_detour(self, sim_time):
+        self._detour_active = False
+        self._detour_start_distance = None
+        self._detour_start_time = None
+        self._progress_best = float("inf")
+        self._progress_time = sim_time
+
+    def _detour_leave_ready(self, goal):
+        """Bug2-style leave condition: net progress and a clear goal line."""
+        return (
+            math.hypot(goal[0], goal[1])
+            < self._detour_start_distance - DWA_DETOUR_LEAVE_MARGIN
+            and self._goal_line_has_headroom()
+        )
+
     def _leave_recovery_for_dwa(self):
         """Hand an active recovery episode back to the normal DWA rollout.
 
@@ -1333,6 +1533,35 @@ class DynamicWindowAvoidance:
         self.wall_front_turn_sign = None
         self._recovery_escape_streak = 0
         self._recovery_reentry_latched = True
+        side = None
+        if self._last_ranges is not None and self._last_goal is not None:
+            side = self._detour_side_toward_goal(self._last_ranges, self._last_goal)
+        self._episode_side = side if side is not None else self.recovery_turn_sign
+        self._episode_side_disagree = 0
+
+    def _update_episode_side(self, ranges, goal):
+        """Follow the goal-relative side of the current blocker, with hysteresis.
+
+        The side is re-derived from the tangent rule every frame but only
+        switches after EPISODE_SIDE_SWITCH_FRAMES consecutive disagreements,
+        so a new blocker is handled on its own shorter side without the
+        frame-to-frame flipping a bare re-evaluation would cause.
+        """
+        if not self._recovery_reentry_latched:
+            self._episode_side = None
+            self._episode_side_disagree = 0
+            return
+        candidate = self._detour_side_toward_goal(ranges, goal)
+        if self._episode_side is None:
+            self._episode_side = candidate if candidate is not None else self.recovery_turn_sign
+            return
+        if candidate is not None and candidate != self._episode_side:
+            self._episode_side_disagree += 1
+            if self._episode_side_disagree >= _EPISODE_SIDE_SWITCH_FRAMES:
+                self._episode_side = candidate
+                self._episode_side_disagree = 0
+        else:
+            self._episode_side_disagree = 0
 
     def _emergency_turn(self, ranges):
         return self._start_recovery(ranges, "emergency_turn")
@@ -1414,6 +1643,7 @@ class DynamicWindowAvoidance:
         return 0.0, 0.0, "DWA 복구 안전 경로 없음 - 정지"
 
     def _reset_crossing_state(self):
+        self._crossing_mover_lost_time = None
         self.crossing_waiting = False
         self.crossing_gap_steps = 0
         self.crossing_commit_active = False
@@ -1525,6 +1755,7 @@ class DynamicWindowAvoidance:
 
     def _evaluate_crossing_hazard(
         self, moving_obstacles, rear_distance, obstacles=None, pose=None,
+        sim_time=None,
     ):
         """측면 접근 및 전방 횡단 동적 장애물에 대한 선제적 회피 및 대기 판단."""
         check_obstacles = moving_obstacles if obstacles is None else obstacles
@@ -1663,15 +1894,41 @@ class DynamicWindowAvoidance:
                 for obstacle in moving_obstacles
             )
             if not zone_has_tracked_mover:
-                # The track that triggered the wait is no longer tracked as a
-                # mover (it may never have been a real one - e.g. a transient
-                # LiDAR cluster near a static edge during a sharp turn). There
-                # is nothing left to wait on a "departure" from, so release
-                # the wait and let the normal DWA rollout/recovery handle
-                # whatever obstacle remains, rather than stalling forever or
-                # forcing a straight-line commit dash into it.
+                # A mover that stopped beside the robot's path (dwelling at
+                # the end of its lane) drops out of the tracker after 2.5 s
+                # but can re-enter the lane at any moment; entering then got
+                # the robot hit.  Keep waiting while something still occupies
+                # the mover band next to the path, for a bounded time.
+                band_occupied = any(
+                    len(point) == 2
+                    and DWA_CROSSING_CLEARING_X_RANGE[0] <= point[0]
+                    <= DWA_CROSSING_YIELD_X_RANGE[1]
+                    and abs(point[1]) <= _STOPPED_MOVER_BAND_HALF_WIDTH
+                    for point in check_obstacles
+                )
+                if self._crossing_mover_lost_time is None:
+                    self._crossing_mover_lost_time = sim_time
+                if (
+                    band_occupied
+                    and sim_time is not None
+                    and sim_time - self._crossing_mover_lost_time
+                    <= _STOPPED_MOVER_MAX_WAIT_SECONDS
+                ):
+                    self.current_v = 0.0
+                    self.current_w = 0.0
+                    return self._finalize_action(
+                        (0.0, 0.0, "DWA 횡단 장애물 정지 - 재진입 대기"),
+                        check_obstacles,
+                    )
+                # Otherwise the track that triggered the wait is gone (it may
+                # never have been a real one - e.g. a transient LiDAR cluster
+                # near a static edge during a sharp turn). Release the wait
+                # and let the normal DWA rollout/recovery handle whatever
+                # obstacle remains, rather than stalling forever or forcing a
+                # straight-line commit dash into it.
                 self._reset_crossing_state()
                 return None
+            self._crossing_mover_lost_time = None
             if self._crossing_gap_is_acceptable(
                 moving_obstacles, check_obstacles
             ):
@@ -1791,13 +2048,27 @@ class DynamicWindowAvoidance:
                     for w in yaw_rates:
                         av, aw, left, right = self._achievable_velocity(v, w)
                         records.append((av, aw, left, right, self._simulate(av, aw)))
-                self._rollout_cache = (key, records)
+                paths = (
+                    np.asarray([record[4] for record in records], dtype=float)[:, :, :2]
+                    if np is not None else None
+                )
+                self._rollout_cache = (key, records, paths)
             records = self._rollout_cache[1]
-            static_values, dynamic_values = self._sensor_clearances(
-                [record[4] for record in records], fixed_obstacles, moving_obstacles)
-            horizon_values = self._horizon_static_clearances(
-                [record[4] for record in records], fixed_obstacles)
+            # The whole-horizon static clearance ranks candidates only: the
+            # 1.2 s safety filter can call a rollout that bends back toward
+            # the goal around a corner safe right up to the frame where every
+            # forward candidate collides.
+            static_values, dynamic_values, horizon_values = self._sensor_clearances(
+                [record[4] for record in records], fixed_obstacles, moving_obstacles,
+                paths=self._rollout_cache[2], with_horizon=True)
             headroom_distance = self._headroom_distance(goal, fixed_obstacles)
+            # A latched avoidance episode (recovery handed back to DWA while
+            # the obstacle is still in the front arc) keeps the side it chose.
+            # Without this, a symmetric blocker (box centred ahead, goal
+            # behind it) left DWA creeping straight at it between backoffs.
+            episode_side = (
+                self._episode_side if self._recovery_reentry_latched else None
+            )
             candidate_index = 0
 
         best = None
@@ -1865,8 +2136,15 @@ class DynamicWindowAvoidance:
                     headroom = self._static_headroom_term(
                         horizon_clearance, headroom_distance
                     )
-                    score_terms = dict(score_terms, headroom=headroom)
-                    score = score_terms["total"] + headroom
+                    side = (
+                        DWA_EPISODE_SIDE_WEIGHT * episode_side * max(
+                            -1.0, min(1.0, actual_w / DWA_WALL_FOLLOW_TURN_RATE)
+                        )
+                        if episode_side is not None
+                        else 0.0
+                    )
+                    score_terms = dict(score_terms, headroom=headroom, side=side)
+                    score = score_terms["total"] + headroom + side
                 if self.current_w != 0.0 and w * self.current_w > 0.0:
                     score += 0.001
                 candidate_debug = {
@@ -1883,6 +2161,7 @@ class DynamicWindowAvoidance:
                         score_terms["stop_penalty"] if score_terms else None
                     ),
                     "headroom": score_terms["headroom"] if score_terms else None,
+                    "side": score_terms["side"] if score_terms else None,
                     "static_clearance": static_clearance,
                     "dynamic_clearance": dynamic_clearance,
                 }
@@ -1968,10 +2247,13 @@ class DynamicWindowAvoidance:
             self._front_corner_escape_active = False
             self._front_corner_escape_origin = None
             self._recovery_reentry_latched = False
+            self._detour_active = False
+            self._progress_goal_world = None
             self._reset_crossing_state()
             return 0.0, 0.0, "LiDAR 없음 - 정지"
 
         ranges = self._reject_isolated_body_returns(ranges)
+        self._last_ranges = ranges
         obstacles = self._scan_with_dynamic_obstacles(ranges, pose, sim_time)
         self.last_obstacles = obstacles
         self._update_crossing_commit_progress(pose)
@@ -2000,6 +2282,7 @@ class DynamicWindowAvoidance:
         goal_approach_clearance = self._goal_approach_clearance(
             goal, fixed_obstacles
         )
+        self._update_episode_side(ranges, goal)
         if (
             self._recovery_reentry_latched
             and static_front_arc_distance >= DWA_RECOVERY_CLEAR_DISTANCE
@@ -2019,11 +2302,33 @@ class DynamicWindowAvoidance:
             self._front_corner_escape_active = False
             self._front_corner_escape_origin = None
         if sensor_mode:
+            # Update before the crossing branch (which returns early) so that
+            # yielding to or committing through a crossing really restarts
+            # the no-progress timer instead of leaving it stale.
+            stuck = self._update_progress_watchdog(goal, pose, sim_time)
             crossing_action = self._evaluate_crossing_hazard(
-                moving_obstacles, rear_distance, obstacles, pose
+                moving_obstacles, rear_distance, obstacles, pose, sim_time
             )
             if crossing_action is not None:
+                if self._detour_active:
+                    self._end_detour(sim_time)
                 return crossing_action
+            if self._detour_active and (
+                sim_time - self._detour_start_time > DWA_DETOUR_MAX_SECONDS
+            ):
+                # Give up on this side; the next trigger tries the other one.
+                self._end_detour(sim_time)
+                self._leave_recovery_for_dwa()
+            elif (
+                stuck
+                and not self._detour_active
+                and not moving_obstacles
+                and not self.crossing_waiting
+                and not self.crossing_commit_active
+            ):
+                # A wall-follow detour is a static-obstacle manoeuvre: never
+                # start one next to a tracked mover or a crossing episode.
+                self._start_detour(ranges, goal, sim_time)
 
         if (
             self.backoff_steps
@@ -2052,7 +2357,8 @@ class DynamicWindowAvoidance:
                 self.backoff_steps = 0
                 if self.recovery_phase is None:
                     self.recovery_phase = "turn"
-                    self.recovery_turn_sign = self._select_turn_sign(ranges)
+                    if self.recovery_turn_sign is None:
+                        self.recovery_turn_sign = self._select_turn_sign(ranges)
                 self.current_v = 0.0
                 self.current_w = 0.0
                 return 0.0, 0.0, "DWA 후진 복구 완료"
@@ -2075,6 +2381,24 @@ class DynamicWindowAvoidance:
             # No safe retreat exists: leave the backoff and let the normal
             # rollout / recovery chain (all safety gated) decide.
             self.backoff_steps = 0
+        if self._detour_active:
+            if self.recovery_phase != "wall_follow" or self._detour_leave_ready(goal):
+                # Net progress with a clear goal line (or the detour was
+                # displaced by a backoff/turn): hand back to the rollout.
+                self._end_detour(sim_time)
+                self._leave_recovery_for_dwa()
+            else:
+                detour_action = self._recovery_action(
+                    ranges, static_front_distance, static_front_arc_distance
+                )
+                if detour_action is not None:
+                    left, right, description = self._validate_recovery_action(
+                        detour_action, obstacles
+                    )
+                    return left, right, f"DWA 우회 벽 추종 - {description}"
+                # The wall follower lost its wall: leave the detour.
+                self._end_detour(sim_time)
+                self._leave_recovery_for_dwa()
         if self.recovery_phase is not None:
             # recovery_phase being active used to make this branch return
             # unconditionally, without ever reconsidering whether a normal,

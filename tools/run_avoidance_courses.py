@@ -88,7 +88,7 @@ def main():
         ))
     failed = 0
     columns = ("completed", "reached_waypoints", "total_waypoints", "contacts", "stalled",
-               "timed_out", "seconds", "recovery_entries", "max_turn_flips",
+               "timed_out", "seconds", "recovery_entries", "detours", "max_turn_flips",
                "oscillation_events", "min_lidar_clearance", "planner_mean_ms", "planner_max_ms")
     for name, result, log in results:
         if result is None:

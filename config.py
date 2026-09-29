@@ -94,6 +94,11 @@ DWA_STATIC_HEADROOM_WEIGHT = 1.0
 # Sensor-mode scoring: a candidate that does not translate (turning in place)
 # while the local goal is within this bearing is idling and is ranked lower by
 # DWA_IDLE_PENALTY.  Rotation remains free when the goal needs a real turn.
+# Sensor-mode scoring: while a recovery episode is latched (handed back to DWA
+# with the obstacle still in the front arc) rollouts turning toward the
+# episode's chosen side gain up to this much, so a symmetric blocker does not
+# leave DWA undecided.  Ranking only; admissibility is unchanged.
+DWA_EPISODE_SIDE_WEIGHT = 0.3
 DWA_IDLE_HEADING_TOLERANCE = 0.35
 DWA_IDLE_PENALTY = 0.5
 # Below this local-goal distance the planner stops asking for progress.  Keep
@@ -119,6 +124,16 @@ DWA_PATH_RELEASE_CONFIRM_STEPS = 3
 # candidates existed the whole time. Kept > 1 (not released on a single
 # lucky frame) for the same reason as DWA_PATH_RELEASE_CONFIRM_STEPS.
 DWA_RECOVERY_ESCAPE_CONFIRM_STEPS = 3
+# Progress watchdog (pose based): no DWA_PROGRESS_MIN_IMPROVEMENT reduction of
+# the local-goal distance for DWA_PROGRESS_TIMEOUT seconds (crossing waits
+# excluded) starts a wall-follow detour around the local minimum.  The detour
+# ends Bug2-style once the robot is DWA_DETOUR_LEAVE_MARGIN closer than where
+# it started and the straight goal line has headroom, or after
+# DWA_DETOUR_MAX_SECONDS, after which the next detour takes the other side.
+DWA_PROGRESS_TIMEOUT = 8.0
+DWA_PROGRESS_MIN_IMPROVEMENT = 0.10
+DWA_DETOUR_MAX_SECONDS = 45.0
+DWA_DETOUR_LEAVE_MARGIN = 0.10
 DWA_RECOVERY_YAW_RATE = 1.0
 DWA_TURN_SWITCH_MARGIN = 0.75
 DWA_WALL_FOLLOW_DISTANCE = 0.48

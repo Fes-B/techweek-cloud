@@ -16,7 +16,6 @@ Moving actors (``Robot`` nodes) are ignored.
 
 import argparse
 import ast
-from collections import deque
 import heapq
 import json
 import math

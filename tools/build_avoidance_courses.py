@@ -14,7 +14,6 @@ margin (0.22 m from each wall face, i.e. >= 0.44 m wall to wall); the
 """
 
 import argparse
-import math
 from pathlib import Path
 import re
 import sys
@@ -113,6 +112,20 @@ course("stress_u_trap", (0.0, 0.0, 0.0), [(3.0, 0.0)],
        [wall_y(-0.8, 0.8, 1.8, "u back"), wall_x(0.9, 1.8, 0.8, "u north arm"),
         wall_x(0.9, 1.8, -0.8, "u south arm")],
        max_seconds=150.0, kind="stress")
+# Diagnostic companions (same geometry, reported separately): the U-trap with
+# a 120 s no-progress window distinguishes a permanent stall from a slow but
+# correct wall-follow detour, and the chicane with gap waypoints is what a
+# global planner would hand the local planner.
+course("stress_u_trap_long", (0.0, 0.0, 0.0), [(3.0, 0.0)],
+       [wall_y(-0.8, 0.8, 1.8, "u back"), wall_x(0.9, 1.8, 0.8, "u north arm"),
+        wall_x(0.9, 1.8, -0.8, "u south arm")],
+       max_seconds=240.0, stall_seconds=120.0, kind="stress")
+course("stress_chicane_waypoints", (0.0, 0.0, 0.0),
+       [(1.5, 0.62), (3.0, -0.65), (4.5, 0.65), (6.0, 0.0)],
+       [wall_y(-1.0, 0.30, 1.5, "gate 1"), wall_y(-0.30, 1.0, 3.0, "gate 2"),
+        wall_y(-1.0, 0.30, 4.5, "gate 3"),
+        wall_x(0.0, 6.5, 1.06, "north"), wall_x(0.0, 6.5, -1.06, "south")],
+       max_seconds=180.0, kind="stress")
 course("stress_corridor_exit_obstacle", (0.0, 0.0, 0.0), [(1.0, 0.0), (5.5, 0.0)],
        [wall_x(0.5, 3.5, 0.50, "corridor north"),
         wall_x(0.5, 3.5, -0.50, "corridor south"),
@@ -129,6 +142,20 @@ course("stress_mixed_static_dynamic", (0.0, 0.0, 0.0), [(1.2, 0.0), (5.0, 0.0)],
               "axis=y min=-1.40 max=1.40 speed=0.30 dwell=2.0 start=min "
               "trigger_axis=x trigger=1.40 trigger_dir=ge robot=EXTENDED_ROBOT")],
        kind="stress")
+
+
+# Extended corridor 2 in its original coordinates with only actor C (fast,
+# 0.45 m/s, 3.5 s dwell at both lane ends inside the corridor) and the
+# original waypoints, one of which lies on the actor's lane.
+course("stress_corridor_crossing", (-8.60, 1.60, 1.5708),
+       [(-8.60, 2.20), (-8.60, 3.20), (-8.60, 4.40)],
+       [wall_y(2.20, 5.20, -9.30, "corridor2 west wall"),
+        wall_y(2.20, 5.20, -7.90, "corridor2 east wall")],
+       [actor("dynamic actor C fast", -9.00, 3.20,
+              "axis=x min=-9.00 max=-8.20 speed=0.45 dwell=3.5 start=min "
+              "trigger_axis=y trigger=2.70 trigger_dir=ge gate_axis=x "
+              "gate_min=-9.00 gate_max=-8.20 robot=EXTENDED_ROBOT")],
+       max_seconds=120.0, floor=(6.0, 8.0), kind="stress")
 
 
 def _endurance():
