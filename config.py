@@ -203,9 +203,10 @@ STATIC_DWA_MAX_SPEED = DWA_MAX_LINEAR_SPEED
 # Extended dynamic-A actor reached the robot's lane before any yield).
 DYNAMIC_CAUTION_SPEED = PRACTICE_PATH_SPEED
 DYNAMIC_CAUTION_MIN_CLOSING_SPEED = 0.05  # m/s towards the robot
-# End-state (inevitable collision) check: a DWA rollout's end point, held
-# stationary, must keep the dynamic margin from every approaching mover of at
-# least this speed for this much longer (constant-velocity prediction).
+# Braking (inevitable collision) check: a DWA candidate executed for one step,
+# then braked at the DWA acceleration limits and held stationary for this long,
+# must keep the dynamic margin from every approaching mover of at least this
+# speed (constant-velocity prediction).
 DYNAMIC_ANTICIPATION_HOLD_SECONDS = 2.5
 DYNAMIC_ANTICIPATION_MIN_SPEED = 0.10
 STATIC_DWA_PROGRESS_WEIGHT = 4.0
@@ -216,6 +217,23 @@ STATIC_DWA_SPEED_WEIGHT = 0.4
 # score ties caused by LiDAR noise without overriding a real score difference.
 STATIC_DWA_TURN_HYSTERESIS_WEIGHT = 0.05
 STATIC_DWA_CLEARANCE_SCALE = 0.8  # (clearance - radius) / scale, clipped to [0, 1]
+# The local goal is a waypoint to pass through, not a pose to stop at: the
+# path layer switches to the next waypoint within 0.14 m.  A rollout that
+# passes within this radius of a (non-projected) waypoint before its tail is
+# cut scores as having reached it, so DWA no longer brakes on every approach.
+# Smaller than the 0.14 m switch distance so a passing rollout really switches.
+STATIC_DWA_WAYPOINT_PASS_RADIUS = 0.10
+# Execution buffer for NORMAL_DWA only (stricter than the shared veto, never
+# looser).  From a clearance above static safety distance + buffer a candidate
+# must stay above it; inside the buffer it may not lower the robot's clearance
+# by more than the tolerance (driving along a wall is fine, towards it is not).
+# Without it DWA hugs the 0.22 m boundary; LiDAR noise / tracking error then
+# puts the robot a millimetre inside the margin, where the legacy "must move
+# away" rule admits nothing next to a wall (forward and reverse both approach
+# a wall point, in-place rotation is forbidden) -- Extended truth run 10,
+# waypoint 8, 15 s frozen.
+STATIC_DWA_EXECUTION_BUFFER = 0.01
+STATIC_DWA_BUFFER_TOLERANCE = 0.002  # ~LiDAR range noise
 
 # Local cost-to-go field (scoring aid only; never used as a safety check).
 # Built every frame from the current scan's static points in a world-aligned

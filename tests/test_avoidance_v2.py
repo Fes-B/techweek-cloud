@@ -21,6 +21,7 @@ from avoidance_v2 import (
     StaticPersistenceFilter,
     filter_isolated_returns,
 )
+from avoidance import DynamicWindowAvoidance
 from config import (
     MAX_SPEED,
     RECOVERY_BACKOFF_DISTANCE,
@@ -352,12 +353,23 @@ class TestCommandContract(unittest.TestCase):
         self.assertTrue(result[:2] == (0.0, 0.0) or planner.is_command_safe(*result[:2]))
 
     def test_output_is_always_vetted_by_the_shared_safety_model(self):
+        # Every non-STOP command passes the shared veto -- except the one
+        # documented case (_emit / _safer_than_stopping): a dynamic-layer
+        # command kept because STOP itself is predicted to be hit.  Even then
+        # the static part of the veto must hold.  (The legacy tracker can
+        # report a static box face seen from a moving viewpoint as a mover.)
         frames = Frames(CASES["frontal"]["boxes"], goal=(3.2, 0.0))
+        planner = frames.planner
         pose = [0.0, 0.0, 0.0]
         for _ in range(int(20.0 / DT)):
             result = frames.step(tuple(pose))
-            if result[:2] != (0.0, 0.0):
-                self.assertTrue(frames.planner.is_command_safe(*result[:2]))
+            if result[:2] != (0.0, 0.0) and not planner.is_command_safe(*result[:2]):
+                self.assertIn("(safer than stopping)", result[2])
+                obstacles = planner.last_obstacles
+                self.assertTrue(planner._stopping_is_unsafe(obstacles))
+                velocity, rate = linear(result), yaw_rate(result)
+                fixed = [point for point in obstacles if len(point) == 2]
+                self.assertTrue(planner._toolkit._velocity_is_safe(velocity, rate, fixed))
             pose[0] += linear(result) * math.cos(pose[2]) * DT
             pose[1] += linear(result) * math.sin(pose[2]) * DT
             pose[2] += yaw_rate(result) * DT
@@ -495,20 +507,37 @@ class TestStaticPersistenceFilter(unittest.TestCase):
 class TestDynamicAnticipation(unittest.TestCase):
     def setUp(self):
         self.planner = ProgressDWA()
-        self.straight, _ = self.planner._rollouts([(0.24, 0.0)])  # ends at x = 0.6 m
 
     def test_no_movers_means_no_constraint(self):
-        self.assertEqual(math.inf, float(self.planner._anticipation_clearance(self.straight, [])[0]))
+        self.assertEqual(math.inf, float(self.planner._braking_gap([0.24], [0.0], [])[0]))
 
-    def test_rollout_end_inside_an_approaching_movers_path_is_rejected(self):
-        # Mover 1.2 m to the side of the rollout end, closing at 0.3 m/s: it
-        # reaches the end point after the legacy 1.2 s prediction window.
-        clearance = self.planner._anticipation_clearance(self.straight, [(0.6, 1.2, 0.0, -0.3)])
-        self.assertLess(float(clearance[0]), DYNAMIC_SAFE_DISTANCE)
+    def test_stopping_in_an_approaching_movers_path_is_rejected(self):
+        # Mover 1.2 m to the side, closing at 0.4 m/s: it reaches the robot
+        # after the legacy 1.2 s prediction window, but a stopped robot here
+        # would still be hit.
+        gap = self.planner._braking_gap([0.0], [0.0], [(0.1, 1.2, 0.0, -0.4)])
+        self.assertLess(float(gap[0]), DYNAMIC_SAFE_DISTANCE)
 
-    def test_receding_mover_does_not_constrain_the_end_state(self):
-        clearance = self.planner._anticipation_clearance(self.straight, [(0.6, 1.2, 0.0, 0.3)])
-        self.assertGreater(float(clearance[0]), 1.0)
+    def test_receding_mover_does_not_constrain_stopping(self):
+        gap = self.planner._braking_gap([0.0], [0.0], [(0.1, 1.2, 0.0, 0.4)])
+        self.assertEqual(math.inf, float(gap[0]))
+
+    def test_braking_candidates_stay_admissible_at_cruise_speed(self):
+        # A mover will cross 0.6 m ahead -- exactly where every 2.5 s
+        # constant-velocity rollout ends.  The robot can still brake before
+        # it, so the window must not be empty (it was with an end-of-rollout
+        # stop check, which pushed the Extended run into a fleeing refuge).
+        planner = self.planner
+        planner.field.build([], (3.0, 0.0), (0.0, 0.0))
+        planner.current_v = 0.24
+        mover = [(0.6, 1.5, 0.0, -0.5)]
+        best, info = planner._evaluate_window((0.0, 0.0, 0.0), [], mover,
+                                              float(planner.field.cost_at(0.0, 0.0)))
+        self.assertIsNotNone(best)
+        self.assertGreater(info["admissible"], 0)
+        trajectories, _ = planner._rollouts([(0.24, 0.0)])
+        self.assertLess(float(planner._rollout_tail_clearance(trajectories, mover)[0]),
+                        DYNAMIC_SAFE_DISTANCE)  # still penalised in the score
 
     def test_approaching_mover_caps_the_cruise_speed(self):
         planner = self.planner
@@ -579,6 +608,68 @@ class TestGoalProjection(unittest.TestCase):
         self.assertTrue(frames.planner.field.goal_projected)
         self.assertLess(math.dist((0.70, 0.0), frames.planner.field.goal), 0.14)
         self.assertGreaterEqual(frames.planner.recovery_count, 1)
+
+
+class TestStaticAdmissibility(unittest.TestCase):
+    def test_matches_the_legacy_veto_rule_without_buffer(self):
+        import random
+        rng = random.Random(3)
+        planner = ProgressDWA()
+        steps = max(1, round(1.2 / config.DWA_SIMULATION_STEP))
+        for _ in range(100):
+            fixed = [(rng.uniform(-0.6, 0.6), rng.uniform(-0.6, 0.6)) for _ in range(4)]
+            fixed = [point for point in fixed if math.hypot(*point) > 0.175]
+            if not fixed:
+                continue
+            requested = [(rng.uniform(0.0, 0.24), rng.uniform(-1.5, 1.5)) for _ in range(10)]
+            trajectories, achieved = planner._rollouts(requested)
+            exact = planner._static_admissible(trajectories, fixed, buffer=0.0)
+            buffered = planner._static_admissible(trajectories, fixed)
+            for index, (v, w, _, _) in enumerate(achieved):
+                legacy = DynamicWindowAvoidance._static_motion_is_safe(
+                    DynamicWindowAvoidance._simulate(v, w)[:steps], fixed)
+                self.assertEqual(legacy, bool(exact[index]))
+                self.assertFalse(bool(buffered[index]) and not legacy)
+
+    def test_dwa_does_not_plan_into_the_execution_buffer(self):
+        planner = ProgressDWA()
+        wall = [(x * 0.02, 0.25) for x in range(-20, 41)]  # left wall, 0.25 m away
+        trajectories, _ = planner._rollouts([(0.10, 0.40), (0.10, 0.0)])
+        towards, straight = planner._static_admissible(trajectories, wall)
+        self.assertFalse(towards)  # would reach < 0.22 + buffer
+        self.assertTrue(straight)
+        # The shared veto itself accepts the approach.
+        self.assertTrue(planner._toolkit._velocity_is_safe(0.10, 0.40, wall))
+
+    def test_inside_the_buffer_driving_along_a_wall_is_allowed(self):
+        planner = ProgressDWA()
+        wall = [(x * 0.02, 0.225) for x in range(-20, 41)]
+        trajectories, _ = planner._rollouts([(0.10, 0.0), (0.10, 0.2)])
+        straight, towards = planner._static_admissible(trajectories, wall)
+        self.assertTrue(straight)
+        self.assertFalse(towards)
+
+
+class TestPassThroughWaypoint(unittest.TestCase):
+    def test_no_braking_when_the_waypoint_is_passed_at_speed(self):
+        planner = ProgressDWA()
+        planner.current_v = config.STATIC_DWA_MAX_SPEED
+        goal = (0.4, 0.0)
+        planner.field.build([], goal, (0.0, 0.0))
+        best, info = planner._evaluate_window((0.0, 0.0, 0.0), [], [],
+                                              float(planner.field.cost_at(0.0, 0.0)))
+        self.assertAlmostEqual(config.STATIC_DWA_MAX_SPEED, best["v"], places=3)
+        self.assertGreater(info["passes_waypoint"], 0)
+
+    def test_projected_goal_is_still_approached_precisely(self):
+        planner = ProgressDWA()
+        planner.current_v = config.STATIC_DWA_MAX_SPEED
+        wall = [(0.45, -0.5 + 0.02 * i) for i in range(51)]
+        planner.field.build(wall, (0.40, 0.0), (0.0, 0.0))
+        self.assertTrue(planner.field.goal_projected)
+        _, info = planner._evaluate_window((0.0, 0.0, 0.0), wall, [],
+                                           float(planner.field.cost_at(0.0, 0.0)))
+        self.assertNotIn("passes_waypoint", info)
 
 
 class TestClosedLoopScenarios(unittest.TestCase):

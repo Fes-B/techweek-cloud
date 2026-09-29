@@ -91,12 +91,15 @@ from config import (
     RECOVERY_MAX_ESCALATION_STEPS,
     RECOVERY_SITE_RADIUS,
     STATIC_DWA_CLEARANCE_SCALE,
+    STATIC_DWA_BUFFER_TOLERANCE,
     STATIC_DWA_CLEARANCE_WEIGHT,
+    STATIC_DWA_EXECUTION_BUFFER,
     STATIC_DWA_HEADING_WEIGHT,
     STATIC_DWA_MAX_SPEED,
     STATIC_DWA_PROGRESS_WEIGHT,
     STATIC_DWA_SPEED_WEIGHT,
     STATIC_DWA_TURN_HYSTERESIS_WEIGHT,
+    STATIC_DWA_WAYPOINT_PASS_RADIUS,
     TIME_STEP,
     WATCHDOG_GOAL_TOLERANCE,
     WATCHDOG_GRACE_SECONDS,
@@ -972,7 +975,8 @@ class ProgressDWA:
             if dynamic_action[:2] == (0.0, 0.0) and self._stopping_is_unsafe(obstacles):
                 # A mover is predicted to reach a stationary robot: look for
                 # a refuge instead of waiting in its path.
-                refuge = self.dynamic.escape(obstacles, goal)
+                _, info = self._evaluate_window(pose, fixed, moving, start_cost)
+                refuge = self._dynamic_refuge(info, obstacles, goal)
                 if refuge is not None:
                     dynamic_action = refuge
             return self._finish_frame(self._emit(dynamic_action, obstacles), avoid=True)
@@ -994,7 +998,7 @@ class ProgressDWA:
         self.diagnostics["dwa"] = info
 
         if best is None and moving:
-            escape = self.dynamic.escape(obstacles, goal)
+            escape = self._dynamic_refuge(info, obstacles, goal)
             if escape is not None:
                 self.layer = "DYNAMIC"
                 self.watchdog.update(dt, pose, goal_distance, paused=True)
@@ -1070,50 +1074,114 @@ class ProgressDWA:
         return np.stack((x, y, heading_after), axis=2), achieved
 
     @staticmethod
-    def _anticipation_clearance(trajectories, moving):
-        """Clearance to movers' constant-velocity paths beyond the 1.2 s check.
+    def _rollout_tail_clearance(trajectories, moving):
+        """Clearance to movers' constant-velocity paths over the rollout tail.
 
-        The legacy dynamic check predicts movers for 1.2 s only.  A mover
-        approaching the robot's future path from the side is then noticed
-        only when escaping is no longer possible (Extended dynamic-A contact
-        at cruise speed).  Two strictly more conservative checks with the
-        same margin are added; they never admit anything the legacy model
-        rejects:
-
-        * rollout: the rest of the 2.5 s rollout against every mover;
-        * end state (inevitable-collision check): the robot stopped at the
-          rollout end must stay clear of every *approaching* mover for a
-          further NAV_ANTICIPATION_HOLD_SECONDS, which rejects "fleeing"
-          ahead of a faster mover and parking inside its path.
+        The legacy dynamic check predicts movers for 1.2 s only.  The rest of
+        the 2.5 s rollout is compared too, but only for *scoring* (it is part
+        of the clearance term): a constant-velocity rollout is not what the
+        robot will do -- it can still brake -- so rejecting on it would leave
+        no admissible candidate at cruise speed near any mover.
         """
         count = len(trajectories)
         if not moving:
             return np.full(count, np.inf)
         objects = np.asarray(moving, dtype=float)
-        steps = np.arange(_SAFETY_STEPS + 1, _ROLLOUT_STEPS + 1)
-        times = steps * DWA_SIMULATION_STEP
+        times = np.arange(_SAFETY_STEPS + 1, _ROLLOUT_STEPS + 1) * DWA_SIMULATION_STEP
         projected = objects[None, :, :2] + times[:, None, None] * objects[None, :, 2:4]
         paths = trajectories[:, _SAFETY_STEPS:_ROLLOUT_STEPS, None, :2]
-        distance = np.hypot(paths[..., 0] - projected[None, :, :, 0],
-                            paths[..., 1] - projected[None, :, :, 1])
-        clearance = distance.min(axis=(1, 2))
+        return np.hypot(paths[..., 0] - projected[None, :, :, 0],
+                        paths[..., 1] - projected[None, :, :, 1]).min(axis=(1, 2))
 
+    @staticmethod
+    def _approaching_movers(moving):
+        objects = np.asarray(moving, dtype=float).reshape(-1, 4)
         speed = np.hypot(objects[:, 2], objects[:, 3])
-        range_ = np.maximum(np.hypot(objects[:, 0], objects[:, 1]), 1e-6)
-        closing = -(objects[:, 0] * objects[:, 2] + objects[:, 1] * objects[:, 3]) / range_
-        credible = (speed >= DYNAMIC_ANTICIPATION_MIN_SPEED) & (
-            closing >= DYNAMIC_CAUTION_MIN_CLOSING_SPEED)
-        if not credible.any():
-            return clearance
-        approaching = objects[credible]
-        horizon = _ROLLOUT_STEPS * DWA_SIMULATION_STEP
-        hold = horizon + np.arange(1, int(round(DYNAMIC_ANTICIPATION_HOLD_SECONDS
-                                                / DWA_SIMULATION_STEP)) + 1) * DWA_SIMULATION_STEP
-        future = approaching[None, :, :2] + hold[:, None, None] * approaching[None, :, 2:4]
-        ends = trajectories[:, -1, :2]
-        gap = np.hypot(ends[:, None, None, 0] - future[None, :, :, 0],
-                       ends[:, None, None, 1] - future[None, :, :, 1]).min(axis=(1, 2))
-        return np.minimum(clearance, gap)
+        distance = np.maximum(np.hypot(objects[:, 0], objects[:, 1]), 1e-6)
+        closing = -(objects[:, 0] * objects[:, 2] + objects[:, 1] * objects[:, 3]) / distance
+        return objects[(speed >= DYNAMIC_ANTICIPATION_MIN_SPEED)
+                       & (closing >= DYNAMIC_CAUTION_MIN_CLOSING_SPEED)]
+
+    @classmethod
+    def _braking_gap(cls, velocity, yaw_rate, moving):
+        """Inevitable-collision check: can the robot still stop out of the way?
+
+        For each candidate the robot executes it for one step, then brakes at
+        the DWA acceleration limits and stays stopped for
+        DYNAMIC_ANTICIPATION_HOLD_SECONDS.  Returned is the smallest distance
+        to every *approaching* mover's constant-velocity prediction over that
+        time (inf without such movers).  If the maximum-braking candidate was
+        clear in the previous frame, it is (up to prediction changes) clear
+        again now, so this check does not dead-end at cruise speed the way a
+        "stop at the end of the 2.5 s rollout" check does, and it rejects
+        fleeing ahead of a mover or parking in its path.
+        """
+        velocity = np.asarray(velocity, dtype=float)
+        yaw_rate = np.asarray(yaw_rate, dtype=float)
+        approaching = cls._approaching_movers(moving) if len(moving) else np.zeros((0, 4))
+        if not len(approaching):
+            return np.full(len(velocity), np.inf)
+        step = DWA_SIMULATION_STEP
+        stop_time = max(float(np.max(np.abs(velocity))) / DWA_LINEAR_ACCELERATION,
+                        float(np.max(np.abs(yaw_rate))) / DWA_ANGULAR_ACCELERATION)
+        count = int(math.ceil((step + stop_time + DYNAMIC_ANTICIPATION_HOLD_SECONDS) / step))
+        v, w = velocity.copy(), yaw_rate.copy()
+        x = np.zeros_like(v)
+        y = np.zeros_like(v)
+        theta = np.zeros_like(v)
+        gap = np.full(len(v), np.inf)
+        for index in range(1, count + 1):
+            x = x + v * np.cos(theta) * step
+            y = y + v * np.sin(theta) * step
+            theta = theta + w * step
+            future = approaching[:, :2] + index * step * approaching[:, 2:4]
+            distance = np.hypot(x[:, None] - future[None, :, 0], y[:, None] - future[None, :, 1])
+            gap = np.minimum(gap, distance.min(axis=1))
+            v = np.maximum(0.0, v - DWA_LINEAR_ACCELERATION * step)
+            w = np.sign(w) * np.maximum(0.0, np.abs(w) - DWA_ANGULAR_ACCELERATION * step)
+        return gap
+
+    @staticmethod
+    def _static_admissible(trajectories, fixed, buffer=STATIC_DWA_EXECUTION_BUFFER):
+        """Vectorised DynamicWindowAvoidance._static_motion_is_safe (+ buffer).
+
+        With ``buffer=0`` this is exactly the final veto's rule, for every
+        candidate at once: over the 1.2 s safety prefix a point may never come
+        within the robot radius; a point outside the static safety distance
+        must stay outside it; a point already inside it (the robot drifted in
+        by a few mm) must be left behind -- no step closer, the last step
+        farther.  Using only "min clearance > safety distance" here would
+        reject every candidate once the robot is inside the margin, including
+        the ones the veto accepts, and freeze NORMAL_DWA.
+
+        ``buffer`` (STATIC_DWA_EXECUTION_BUFFER) only makes it stricter, on the
+        robot's overall clearance c (closest point over the prefix): from
+        clearance c0 > safety distance + buffer a candidate must keep c above
+        that; with c0 inside the buffer it may not lower the clearance
+        (beyond STATIC_DWA_BUFFER_TOLERANCE), so it can drive along a wall but
+        not towards it.  DWA thus never plans along the exact veto boundary.
+        """
+        count = len(trajectories)
+        if not fixed:
+            return np.ones(count, dtype=bool)
+        points = np.asarray(fixed, dtype=float)[:, :2]
+        initial = np.hypot(points[:, 0], points[:, 1])
+        paths = trajectories[:, :_SAFETY_STEPS, None, :2]
+        distance = np.hypot(paths[..., 0] - points[None, None, :, 0],
+                            paths[..., 1] - points[None, None, :, 1])
+        closest = distance.min(axis=1)  # candidates x points
+        inside = initial <= STATIC_SAFE_DISTANCE
+        outside_ok = closest > STATIC_SAFE_DISTANCE
+        leaving_ok = (closest >= initial[None, :] - 1e-6) & (
+            distance[:, -1, :] > initial[None, :] + 1e-3)
+        ok = np.where(inside[None, :], leaving_ok, outside_ok) & (closest > DWA_ROBOT_RADIUS)
+        ok = ok.all(axis=1)
+        if buffer > 0.0:
+            clearance = closest.min(axis=1)
+            current = float(initial.min())
+            ok &= (clearance > STATIC_SAFE_DISTANCE + buffer) | (
+                clearance >= current - STATIC_DWA_BUFFER_TOLERANCE)
+        return ok
 
     def _evaluate_window(self, pose, fixed, moving, start_cost):
         cautious = self._approaching_mover(moving)
@@ -1129,14 +1197,17 @@ class ProgressDWA:
         dynamic = np.asarray(dynamic, dtype=float)
         requested_v = np.array([item[0] for item in requested])
         clearance = np.minimum(static, dynamic)
-        static_ok = static > STATIC_SAFE_DISTANCE
+        static_ok = self._static_admissible(trajectories, fixed)
         dynamic_ok = dynamic > DYNAMIC_SAFE_DISTANCE
         braking_ok = requested_v ** 2 / (2.0 * DWA_LINEAR_ACCELERATION) <= clearance - DWA_ROBOT_RADIUS
-        anticipation = self._anticipation_clearance(trajectories, moving)
-        admissible = static_ok & dynamic_ok & braking_ok & (anticipation > DYNAMIC_SAFE_DISTANCE)
+        actual_v = np.array([item[0] for item in achieved])
+        actual_w = np.array([item[1] for item in achieved])
+        stoppable = self._braking_gap(actual_v, actual_w, moving)
+        admissible = static_ok & dynamic_ok & braking_ok & (stoppable > DYNAMIC_SAFE_DISTANCE)
         without_dynamic = static_ok & (
             requested_v ** 2 / (2.0 * DWA_LINEAR_ACCELERATION) <= static - DWA_ROBOT_RADIUS
         )
+        clearance = np.minimum(clearance, self._rollout_tail_clearance(trajectories, moving))
         near_mover = any(
             math.hypot(point[0], point[1]) <= DWA_CROSSING_DETECTION_DISTANCE
             for point in moving
@@ -1155,10 +1226,17 @@ class ProgressDWA:
             "best": None,
         }
         if not admissible.any():
+            if len(moving):
+                # Least-bad fallback for the dynamic layer: the statically safe
+                # candidate that keeps the most room from movers, counting both
+                # the legacy 1.2 s check and the braking check.
+                room = np.where(without_dynamic, np.minimum(dynamic, stoppable), -np.inf)
+                index = int(np.argmax(room))
+                if np.isfinite(room[index]):
+                    info["refuge"] = {"v": float(actual_v[index]), "w": float(actual_w[index]),
+                                      "room": float(room[index])}
             return None, info
 
-        actual_v = np.array([item[0] for item in achieved])
-        actual_w = np.array([item[1] for item in achieved])
         info["forward_admissible"] = int((admissible & (actual_v > 0.005)).sum())
         x, y, theta = pose
         cosine, sine = math.cos(theta), math.sin(theta)
@@ -1178,6 +1256,16 @@ class ProgressDWA:
         end_heading = theta + trajectories[rows, last, 2]
         descent = self.field.descent_heading_at(world_x[rows, last], world_y[rows, last])
         heading = np.cos(end_heading - descent)
+        if not self.field.goal_projected:
+            # Pass-through waypoint: reaching it is full progress, and where the
+            # rollout ends afterwards (pointing "back" at it) is irrelevant.
+            goal_x, goal_y = self.field.goal
+            passes = (np.hypot(world_x - goal_x, world_y - goal_y)
+                      <= STATIC_DWA_WAYPOINT_PASS_RADIUS) & ~cut
+            reached = passes.any(axis=1)
+            progress = np.where(reached, start_cost / _MAX_PROGRESS, progress)
+            heading = np.where(reached, 1.0, heading)
+            info["passes_waypoint"] = int((reached & admissible).sum())
         finite_clearance = np.where(np.isfinite(clearance), clearance, np.inf)
         clearance_score = np.clip(
             (finite_clearance - DWA_ROBOT_RADIUS) / STATIC_DWA_CLEARANCE_SCALE, 0.0, 1.0
@@ -1482,6 +1570,27 @@ class ProgressDWA:
         self.current_v = velocity
         self.current_w = yaw_rate
         return left, right, description
+
+    def _dynamic_refuge(self, info, obstacles, goal):
+        """Wheel command for "no admissible candidate while movers are near".
+
+        First the window's least-bad candidate (see _evaluate_window), if it
+        keeps more room from the movers than stopping here would; otherwise
+        the legacy short-term refuge search (it can also reverse).  Either
+        goes through _emit, i.e. the shared veto / safer-than-stopping rule.
+        """
+        refuge = info.get("refuge")
+        moving = [point for point in obstacles if len(point) == 4]
+        if refuge is not None and moving:
+            stay = min(
+                self._toolkit._dynamic_reachable_clearance(self._toolkit._simulate(0.0, 0.0), moving),
+                float(self._braking_gap([0.0], [0.0], moving)[0]),
+            )
+            if refuge["room"] > stay + 0.02:
+                _, _, left, right = DynamicWindowAvoidance._achievable_velocity(
+                    refuge["v"], refuge["w"])
+                return left, right, "DWA dynamic refuge (braking check)"
+        return self.dynamic.escape(obstacles, goal)
 
     def _stopping_is_unsafe(self, obstacles):
         moving = [point for point in obstacles if len(point) == 4]
