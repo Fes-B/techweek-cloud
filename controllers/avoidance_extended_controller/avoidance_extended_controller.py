@@ -133,6 +133,20 @@ RESULT_PATH = Path(
     tempfile.gettempdir(), "techweek-avoidance-extended-result.json"
 )
 
+# Debug-only unlimited-time diagnostic (EXTENDED_UNLIMITED=1).  The official
+# benchmark above (MAX_SECONDS, STALL_SECONDS, RESULT_PATH) is unchanged and
+# stays the default.  The diagnostic removes the 420 s limit, detects only
+# permanent stalls (no 0.04 m progress for DIAGNOSTIC_STALL_SECONDS), records
+# where the official 35 s stall rule and the 420 s limit would have fired, and
+# writes a separate report.  DIAGNOSTIC_CAP_SECONDS only guarantees the batch
+# run terminates.
+UNLIMITED_DIAGNOSTIC = os.environ.get("EXTENDED_UNLIMITED") == "1"
+DIAGNOSTIC_STALL_SECONDS = float(os.environ.get("EXTENDED_DIAGNOSTIC_STALL", "180"))
+DIAGNOSTIC_CAP_SECONDS = float(os.environ.get("EXTENDED_DIAGNOSTIC_CAP", "3600"))
+DIAGNOSTIC_RESULT_PATH = Path(
+    tempfile.gettempdir(), "techweek-avoidance-extended-unlimited-result.json"
+)
+
 
 def scenario_index_for_waypoint(waypoint_index):
     for scenario_i, (_, first_idx, last_idx) in enumerate(SCENARIOS):
@@ -157,12 +171,26 @@ def main():
     robot = Supervisor()
     io = RobotIO(robot)
     planner = DynamicWindowAvoidance(lidar_field_of_view=io.lidar.getFov())
-    odometry = EncoderPose(robot, START_POSE)
     node = robot.getSelf()
+    start_pose = START_POSE
+    segment_start_index = 0
+    segment = os.environ.get("EXTENDED_DIAGNOSTIC_START") if UNLIMITED_DIAGNOSTIC else None
+    if segment:
+        # Diagnostic only: start the unchanged course at a later waypoint to
+        # look for further permanent stalls beyond a known blocked section.
+        x, y, yaw, index = (float(value) for value in segment.split(","))
+        start_pose = (x, y, yaw)
+        segment_start_index = int(index)
+        node.getField("translation").setSFVec3f([x, y, 0.04])
+        node.getField("rotation").setSFRotation([0.0, 0.0, 1.0, yaw])
+        node.resetPhysics()
+        print(f"[DIAG] segment start pose={start_pose} waypoint={segment_start_index}",
+              flush=True)
+    odometry = EncoderPose(robot, start_pose)
     node.enableContactPointsTracking(TIME_STEP, True)
     trace = TraceWriter()  # no-op unless AVOID_TRACE names an output file
 
-    waypoint_index = 0
+    waypoint_index = segment_start_index
     current_lap = 1
     contacts = 0
     touching = False
@@ -195,6 +223,8 @@ def main():
     goal_reached = False
     stalled = False
     timed_out = False
+    official_stall_event = None
+    official_timeout_waypoint = None
 
     scenario_stats = [
         {
@@ -273,8 +303,26 @@ def main():
             if measured_distance < best_distance - 0.04:
                 best_distance = measured_distance
                 progress_time = now
-        stalled = waypoint_index < len(WAYPOINTS) and now - progress_time > STALL_SECONDS
-        timed_out = now > MAX_SECONDS
+        official_stall = (
+            waypoint_index < len(WAYPOINTS) and now - progress_time > STALL_SECONDS
+        )
+        if UNLIMITED_DIAGNOSTIC:
+            if official_stall and official_stall_event is None:
+                official_stall_event = (round(now, 3), waypoint_index)
+                print(f"[DIAG] official 35 s stall rule would fire t={now:.2f} "
+                      f"waypoint={waypoint_index}", flush=True)
+            if now > MAX_SECONDS and official_timeout_waypoint is None:
+                official_timeout_waypoint = waypoint_index
+                print(f"[DIAG] official 420 s limit passed at waypoint={waypoint_index}",
+                      flush=True)
+            stalled = (
+                waypoint_index < len(WAYPOINTS)
+                and now - progress_time > DIAGNOSTIC_STALL_SECONDS
+            )
+            timed_out = now > DIAGNOSTIC_CAP_SECONDS
+        else:
+            stalled = official_stall
+            timed_out = now > MAX_SECONDS
 
         if goal_reached or stalled or timed_out or contacts:
             io.stop()
@@ -330,7 +378,22 @@ def main():
                     for stat in scenario_stats
                 ],
             }
-            RESULT_PATH.write_text(json.dumps(result, indent=2), encoding="utf-8")
+            if UNLIMITED_DIAGNOSTIC:
+                result = {
+                    "mode": "unlimited_diagnostic",
+                    **result,
+                    "diagnostic_stall_seconds": DIAGNOSTIC_STALL_SECONDS,
+                    "diagnostic_cap_reached": timed_out,
+                    "stalled_waypoint": waypoint_index if stalled else None,
+                    "official_stall_would_fire": official_stall_event,
+                    "official_timeout_waypoint": official_timeout_waypoint,
+                    "segment_start_index": segment_start_index,
+                    "within_official_420s": goal_reached and now <= MAX_SECONDS,
+                }
+                DIAGNOSTIC_RESULT_PATH.write_text(
+                    json.dumps(result, indent=2), encoding="utf-8")
+            else:
+                RESULT_PATH.write_text(json.dumps(result, indent=2), encoding="utf-8")
             print("[RESULT] " + json.dumps(result), flush=True)
             robot.step(TIME_STEP)
             robot.simulationQuit(0 if passed else 1)

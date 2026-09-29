@@ -1,0 +1,254 @@
+diff --git a/avoidance.py b/avoidance.py
+index b59d05c..77bef3a 100644
+--- a/avoidance.py
++++ b/avoidance.py
+@@ -51,6 +51,7 @@ from config import (
+     DWA_PROGRESS_MIN_IMPROVEMENT,
+     DWA_DETOUR_MAX_SECONDS,
+     DWA_DETOUR_LEAVE_MARGIN,
++    DWA_DETOUR_FRONT_BLOCK_DISTANCE,
+     DWA_EPISODE_SIDE_WEIGHT,
+     DWA_GOAL_REACHED_DISTANCE,
+     DWA_IDLE_HEADING_TOLERANCE,
+@@ -425,6 +426,11 @@ class DynamicWindowAvoidance:
+ 
+         side_distance = left_distance if self.wall_side == "left" else right_distance
+         away_sign = -1.0 if self.wall_side == "left" else 1.0
++        follow_distance = DWA_WALL_FOLLOW_DISTANCE
++        if self._detour_active and math.isfinite(left_distance) and math.isfinite(right_distance):
++            # In a channel narrower than twice the standoff, follow the
++            # centre instead of chasing an unreachable wall distance.
++            follow_distance = min(follow_distance, 0.5 * (left_distance + right_distance))
+ 
+         if self.wall_escape_active:
+             if side_distance >= DWA_WALL_RELEASE_DISTANCE:
+@@ -443,7 +449,22 @@ class DynamicWindowAvoidance:
+ 
+         if front_arc_distance is None:
+             front_arc_distance = self._front_arc_distance(ranges)
+-        if front_arc_distance < DWA_RECOVERY_CLEAR_DISTANCE:
++        if self._detour_active:
++            # Wrapping the end of the followed boundary has priority unless
++            # something is close straight ahead; the wide front arc would see
++            # the opposite side of a channel and turn away from the wall.
++            if (
++                side_distance > DWA_WALL_LOST_DISTANCE
++                and front_distance >= DWA_DETOUR_FRONT_BLOCK_DISTANCE
++            ):
++                self.current_v = min(DWA_WALL_FOLLOW_SPEED, self.side_speed_limit)
++                self.current_w = -away_sign * DWA_WALL_FOLLOW_TURN_RATE
++                left, right = self._wheel_speeds(self.current_v, self.current_w)
++                return left, right, f"DWA 벽 추종 - {self.wall_side} 모서리 회전"
++            front_blocked = front_distance < DWA_DETOUR_FRONT_BLOCK_DISTANCE
++        else:
++            front_blocked = front_arc_distance < DWA_RECOVERY_CLEAR_DISTANCE
++        if front_blocked:
+             self.wall_front_turn_sign = (
+                 away_sign
+                 if self._detour_active
+@@ -458,14 +479,6 @@ class DynamicWindowAvoidance:
+             return left, right, "DWA 벽 추종 - 저속 전진 회피"
+         self.wall_front_turn_sign = None
+ 
+-        if self._detour_active and side_distance > DWA_WALL_LOST_DISTANCE:
+-            # Wrap around the end of the followed boundary (Bug-style)
+-            # instead of releasing; the detour ends on its leave condition.
+-            self.current_v = min(DWA_WALL_FOLLOW_SPEED, self.side_speed_limit)
+-            self.current_w = -away_sign * DWA_WALL_FOLLOW_TURN_RATE
+-            left, right = self._wheel_speeds(self.current_v, self.current_w)
+-            return left, right, f"DWA 벽 추종 - {self.wall_side} 모서리 회전"
+-
+         if side_distance > DWA_WALL_LOST_DISTANCE:
+             self.wall_clear_steps += 1
+         else:
+@@ -482,7 +495,7 @@ class DynamicWindowAvoidance:
+             return None
+ 
+         if math.isfinite(side_distance):
+-            error = DWA_WALL_FOLLOW_DISTANCE - side_distance
++            error = follow_distance - side_distance
+             correction = away_sign * DWA_WALL_FOLLOW_GAIN * error
+             self.current_w = max(-0.6, min(0.6, correction))
+         else:
+@@ -1652,10 +1665,42 @@ class DynamicWindowAvoidance:
+         self.crossing_departure_observed = False
+         self._crossing_exit_distance = DWA_CROSSING_COMMIT_MIN_DISTANCE
+ 
+-    def _record_crossing_zone(self, obstacle_x):
+-        distance = obstacle_x - DWA_CROSSING_CLEARING_X_RANGE[0]
++    def _record_crossing_zone(self, threat, moving_obstacles=()):
++        """Commit distance that carries the whole robot past the mover's lane.
++
++        The old rule (observed near face + 0.25 m along the heading, capped
++        at 1 m) ended commits with the robot's rear still inside the lane --
++        and much more so when crossing a lane at an angle -- where a
++        returning mover then hit it.  Use the lane line through the mover's
++        observed points along its motion, and travel until the robot centre
++        is past that line by the collision radius, the dynamic margin and the
++        observed mover extent, measured perpendicular to the lane.
++        """
++        ox, oy, vx, vy = threat
++        nearby = [
++            point for point in moving_obstacles
++            if math.hypot(point[0] - ox, point[1] - oy) <= 0.4
++        ] or [threat]
++        cx = sum(point[0] for point in nearby) / len(nearby)
++        cy = sum(point[1] for point in nearby) / len(nearby)
++        extent = max(
++            (math.hypot(a[0] - b[0], a[1] - b[1]) for a in nearby for b in nearby),
++            default=0.0,
++        )
++        speed = math.hypot(vx, vy)
++        # A stationary or reversing mover: assume a lane across the heading.
++        ux, uy = (vx / speed, vy / speed) if speed >= DWA_CROSSING_STATIONARY_SPEED else (0.0, 1.0)
++        distance = ox - DWA_CROSSING_CLEARING_X_RANGE[0]
++        if abs(uy) > 0.2:
++            offset = ux * (-cy) + uy * cx  # signed distance of the robot from the lane
++            required = DWA_ROBOT_RADIUS + DWA_DYNAMIC_CLEARANCE_MARGIN + extent
++            distance = max(distance, (abs(offset) + required) / abs(uy))
++        # Keep the longest estimate of this wait episode: once the mover
++        # stops (dwell/reversal) its lane direction is unknown and the
++        # across-the-heading fallback underestimates an angled lane.
++        # _reset_crossing_state() restores the minimum for the next episode.
+         self._crossing_exit_distance = max(
+-            DWA_CROSSING_COMMIT_MIN_DISTANCE,
++            self._crossing_exit_distance,
+             min(DWA_CROSSING_COMMIT_MAX_DISTANCE, distance),
+         )
+ 
+@@ -1711,7 +1756,30 @@ class DynamicWindowAvoidance:
+         check_obstacles = moving_obstacles if obstacles is None else obstacles
+         return self._velocity_is_safe(
+             DWA_CROSSING_COMMIT_SPEED, 0.0, check_obstacles
+-        )
++        ) and self._commit_path_is_clear(check_obstacles)
++
++    def _commit_path_is_clear(self, obstacles):
++        """The whole committed straight line must keep both margins now.
++
++        The commit is checked frame by frame by the common 1.2 s safety gate
++        (about 0.26 m at commit speed).  Accepting a gap on that short check
++        let a commit start while a mover dwelling beside the later part of
++        the line was inside the dynamic margin; the gate then stopped the
++        robot half inside the crossing lane.  Accept only when every point
++        of the committed distance clears each tracked mover by the dynamic
++        margin and each static point by the static margin.
++        """
++        length = self._crossing_exit_distance
++        dynamic_limit = DWA_ROBOT_RADIUS + DWA_DYNAMIC_CLEARANCE_MARGIN
++        static_limit = DWA_ROBOT_RADIUS + DWA_STATIC_CLEARANCE_MARGIN
++        for point in obstacles:
++            x, y = point[0], point[1]
++            along = max(0.0, min(length, x))
++            distance = math.hypot(x - along, y)
++            limit = dynamic_limit if len(point) == 4 else static_limit
++            if distance <= limit:
++                return False
++        return True
+ 
+     def _crossing_commit_collision_is_imminent(self, obstacles):
+         """Abort only when braking cannot avoid the emergency envelope."""
+@@ -1851,7 +1919,7 @@ class DynamicWindowAvoidance:
+             self.crossing_waiting = True
+             self.crossing_gap_steps = 0
+             self.crossing_departure_observed = False
+-            self._record_crossing_zone(imminent_threat[0])
++            self._record_crossing_zone(imminent_threat, moving_obstacles)
+             if rear_distance > DWA_BACKOFF_REAR_DISTANCE:
+                 self.current_v = -DWA_MAX_REVERSE_SPEED
+                 self.current_w = 0.0  # 직진 후진으로 복도 내 자세 유지
+@@ -1879,7 +1947,7 @@ class DynamicWindowAvoidance:
+             self.crossing_waiting = True
+             self.crossing_gap_steps = 0
+             self.crossing_departure_observed = False
+-            self._record_crossing_zone(crossing_threat[0])
++            self._record_crossing_zone(crossing_threat, moving_obstacles)
+             self.current_v = 0.0
+             self.current_w = 0.0
+             return self._finalize_action(
+diff --git a/config.py b/config.py
+index ca6cbbb..b7c702d 100644
+--- a/config.py
++++ b/config.py
+@@ -132,8 +132,12 @@ DWA_RECOVERY_ESCAPE_CONFIRM_STEPS = 3
+ # DWA_DETOUR_MAX_SECONDS, after which the next detour takes the other side.
+ DWA_PROGRESS_TIMEOUT = 8.0
+ DWA_PROGRESS_MIN_IMPROVEMENT = 0.10
+-DWA_DETOUR_MAX_SECONDS = 45.0
++DWA_DETOUR_MAX_SECONDS = 90.0
+ DWA_DETOUR_LEAVE_MARGIN = 0.10
++# During a detour the wall follower treats only the narrow front sector as
++# blocking below this distance (the wide front arc sees the opposite side of
++# a channel).  Commands remain validated by the common safety gate.
++DWA_DETOUR_FRONT_BLOCK_DISTANCE = 0.50
+ DWA_RECOVERY_YAW_RATE = 1.0
+ DWA_TURN_SWITCH_MARGIN = 0.75
+ DWA_WALL_FOLLOW_DISTANCE = 0.48
+@@ -189,7 +193,11 @@ DWA_CROSSING_GAP_MIN_SECONDS = 0.35  # conservative time gap if motion reverses
+ DWA_CROSSING_GAP_CONFIRM_STEPS = 3  # reject one-frame gaps/track jitter
+ DWA_CROSSING_COMMIT_SPEED = 0.22  # faster than the 0.16 m/s nominal path speed
+ DWA_CROSSING_COMMIT_MIN_DISTANCE = 0.65  # carry the robot fully past the crossing
+-DWA_CROSSING_COMMIT_MAX_DISTANCE = 1.00  # bound a bad crossing-range estimate
++# Bound a bad crossing-range estimate.  1.00 m could not carry the robot
++# (0.25 m long, 0.34 m collision diameter) out of a 0.28 m lane plus the
++# dynamic margin once the lane is crossed at an angle; see
++# DynamicWindowAvoidance._record_crossing_zone.
++DWA_CROSSING_COMMIT_MAX_DISTANCE = 1.60
+ DWA_CROSSING_COMMIT_CANCEL_SECONDS = 1.20  # matches the near-term dynamic safety horizon
+ 
+ # Practice vision target. Replace only this section after the event target
+diff --git a/tests/test_avoidance.py b/tests/test_avoidance.py
+index eab64b2..e1ab06d 100644
+--- a/tests/test_avoidance.py
++++ b/tests/test_avoidance.py
+@@ -306,7 +306,14 @@ class TestAvoidanceSafetyContract(unittest.TestCase):
+         self.assertGreater(action[0], 0.0)
+         self.assertIn("crossing commit", action[2])
+ 
+-        planner._update_crossing_commit_progress((0.80, 0.0, 0.0))
++        # The commit length now carries the robot the collision radius plus
++        # the dynamic margin past the mover's lane line (0.82 m here instead
++        # of the former 0.75 m), so drive to the recorded exit rather than a
++        # hard-coded 0.80 m.
++        exit_distance = planner.crossing_commit_remaining
++        planner._update_crossing_commit_progress((exit_distance - 0.01, 0.0, 0.0))
++        self.assertTrue(planner.crossing_commit_active)
++        planner._update_crossing_commit_progress((exit_distance + 0.01, 0.0, 0.0))
+         self.assertFalse(planner.crossing_commit_active)
+ 
+     def test_crossing_commit_is_cancelled_only_for_imminent_collision(self):
+diff --git a/tests/test_avoidance_regressions.py b/tests/test_avoidance_regressions.py
+index 93c2e08..10a7519 100644
+--- a/tests/test_avoidance_regressions.py
++++ b/tests/test_avoidance_regressions.py
+@@ -303,6 +303,30 @@ class TestStoppedMover(unittest.TestCase):
+         self.assertIsNone(released)  # bounded wait
+         self.assertFalse(planner.crossing_waiting)
+ 
++    def test_commit_requires_the_whole_line_to_clear_a_dwelling_mover(self):
++        planner = DynamicWindowAvoidance()
++        planner._crossing_exit_distance = 0.8
++        beside_later = [(0.60, 0.26, 0.0, 0.0)]  # stopped mover beside the line
++        self.assertFalse(planner._commit_path_is_clear(beside_later))
++        far = [(0.60, 0.60, 0.0, 0.0)]
++        self.assertTrue(planner._commit_path_is_clear(far))
++
++    def test_commit_carries_the_robot_past_an_angled_lane(self):
++        planner = DynamicWindowAvoidance()
++        perpendicular = (0.50, 0.30, 0.0, -0.30)
++        planner._record_crossing_zone(perpendicular, [perpendicular])
++        straight = planner._crossing_exit_distance
++        planner._reset_crossing_state()
++        # Same lane crossed at ~60 degrees: the band is longer along the heading.
++        angled = (0.50, 0.30, 0.15, -0.26)
++        planner._record_crossing_zone(angled, [angled])
++        self.assertGreater(planner._crossing_exit_distance, straight)
++        self.assertGreaterEqual(straight, 0.50 + 0.17 + 0.15)
++        # A later stationary observation must not shorten the estimate.
++        longest = planner._crossing_exit_distance
++        planner._record_crossing_zone((0.50, 0.30, 0.0, 0.0), [(0.50, 0.30, 0.0, 0.0)])
++        self.assertEqual(longest, planner._crossing_exit_distance)
++
+     def test_path_follower_is_not_released_during_a_crossing_wait(self):
+         planner = DynamicWindowAvoidance()
+         planner.choose_action([float("inf")] * 180, (2.0, 0.0), (0.0, 0.0, 0.0), 0.0)
