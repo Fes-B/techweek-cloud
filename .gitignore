@@ -6,3 +6,6 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# Webots per-user project state for generated course worlds
+worlds/.course_*.wbproj

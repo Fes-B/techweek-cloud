@@ -84,6 +84,21 @@ DWA_HEADING_WEIGHT = 1.2
 DWA_CLEARANCE_WEIGHT = 1.8
 DWA_SPEED_WEIGHT = 0.8
 DWA_PROGRESS_WEIGHT = 1.0
+# Sensor-mode scoring only (never admissibility): rollouts whose full-horizon
+# static clearance falls below this distance are ranked lower, reaching
+# -DWA_STATIC_HEADROOM_WEIGHT at the static collision margin.  The distance
+# matches the recovery trigger so DWA keeps out of the zone that would start a
+# recovery turn instead of driving into it and handing over to recovery.
+DWA_STATIC_HEADROOM_DISTANCE = 0.50
+DWA_STATIC_HEADROOM_WEIGHT = 1.0
+# Sensor-mode scoring: a candidate that does not translate (turning in place)
+# while the local goal is within this bearing is idling and is ranked lower by
+# DWA_IDLE_PENALTY.  Rotation remains free when the goal needs a real turn.
+DWA_IDLE_HEADING_TOLERANCE = 0.35
+DWA_IDLE_PENALTY = 0.5
+# Below this local-goal distance the planner stops asking for progress.  Keep
+# it smaller than any waypoint acceptance radius used by the integration.
+DWA_GOAL_REACHED_DISTANCE = 0.05
 DWA_RECOVERY_TRIGGER_DISTANCE = 0.50
 DWA_RECOVERY_CLEAR_DISTANCE = 0.75
 # Path-follow release hysteresis: consecutive is_command_safe() frames

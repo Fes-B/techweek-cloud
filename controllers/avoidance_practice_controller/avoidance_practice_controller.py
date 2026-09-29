@@ -21,6 +21,7 @@ from main import (
 )
 from practice_odometry import EncoderPose
 from robot_io import RobotIO
+from tools.avoidance_trace import TraceWriter
 
 
 WAYPOINTS = (
@@ -65,6 +66,7 @@ def main():
     odometry = EncoderPose(robot, (-4.8, -3.5, 0.0))
     node = robot.getSelf()
     node.enableContactPointsTracking(TIME_STEP, True)
+    trace = TraceWriter()  # no-op unless AVOID_TRACE names an output file
 
     waypoint_index = 0
     contacts = 0
@@ -210,6 +212,7 @@ def main():
 
         left, right, control = command
         io.set_wheel_speed(left, right)
+        trace.record(now, pose, local_goal, ranges, command, io.lidar.getFov(), truth)
         action = avoidance_command[2]
         is_avoid = control.startswith("AVOID")
         if is_avoid:

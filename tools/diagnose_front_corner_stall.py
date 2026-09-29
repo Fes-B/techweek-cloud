@@ -68,13 +68,13 @@ def _ray_box_distance(origin, direction, box):
 
 def lidar_scan(pose, box):
     x, y, heading = pose
-    denominator = BEAM_COUNT - 1
+    step = DynamicWindowAvoidance._beam_angle_step(LIDAR_FIELD_OF_VIEW, BEAM_COUNT)
     return [
         _ray_box_distance(
             (x, y),
             (
-                math.cos(heading - LIDAR_FIELD_OF_VIEW / 2.0 + LIDAR_FIELD_OF_VIEW * index / denominator),
-                math.sin(heading - LIDAR_FIELD_OF_VIEW / 2.0 + LIDAR_FIELD_OF_VIEW * index / denominator),
+                math.cos(heading - LIDAR_FIELD_OF_VIEW / 2.0 + step * index),
+                math.sin(heading - LIDAR_FIELD_OF_VIEW / 2.0 + step * index),
             ),
             box,
         )
@@ -129,7 +129,7 @@ def run_case(case_name, seconds=30.0, trace_path=None):
         if closest_index is not None:
             closest_beam = {
                 "index": closest_index,
-                "angle": -LIDAR_FIELD_OF_VIEW / 2.0 + LIDAR_FIELD_OF_VIEW * closest_index / (BEAM_COUNT - 1),
+                "angle": -LIDAR_FIELD_OF_VIEW / 2.0 + closest_index * DynamicWindowAvoidance._beam_angle_step(LIDAR_FIELD_OF_VIEW, BEAM_COUNT),
                 "range": ranges[closest_index],
                 "front": _in_wrapped_sector(closest_index, BEAM_COUNT // 2, max(2, BEAM_COUNT // 36)),
                 "front_arc": _in_wrapped_sector(closest_index, BEAM_COUNT // 2, max(2, BEAM_COUNT // 7)),
