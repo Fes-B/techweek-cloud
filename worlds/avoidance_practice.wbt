@@ -1,0 +1,219 @@
+#VRML_SIM R2025a utf8
+
+WorldInfo {
+  basicTimeStep 32
+}
+Viewpoint {
+  orientation 0 0 1 0
+  position 0 0 14
+}
+Background {
+  skyColor [ 0.76 0.86 1 ]
+}
+DirectionalLight {
+  direction -0.4 0.2 -1
+  intensity 1.2
+}
+Solid {
+  translation 0 0 -0.025
+  name "practice floor"
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.76 0.76 0.73 roughness 0.9 }
+      geometry Box { size 12 10 0.05 }
+    }
+  ]
+  boundingObject Box { size 12 10 0.05 }
+}
+
+# Practice robot: 0.25 x 0.18 m body, differential drive, passive casters.
+DEF PRACTICE_ROBOT Robot {
+  translation -4.8 -3.5 0.04
+  rotation 0 0 1 0
+  name "avoidance practice robot"
+  children [
+    Pose {
+      translation 0 0 0.06
+      children [
+        Shape {
+          appearance PBRAppearance { baseColor 0.12 0.38 0.75 roughness 0.5 }
+          geometry Box { size 0.25 0.18 0.1 }
+        }
+      ]
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 0.115 0 dampingConstant 0.05 }
+      device [
+        PositionSensor { name "left wheel sensor" }
+        RotationalMotor { name "left wheel motor" maxVelocity 6 maxTorque 5 }
+      ]
+      endPoint Solid {
+        translation 0 0.115 0
+        rotation 1 0 0 1.5708
+        name "front left wheel"
+        children [
+          Shape {
+            appearance PBRAppearance { baseColor 0.05 0.05 0.05 roughness 0.9 }
+            geometry Cylinder { height 0.03 radius 0.04 subdivision 32 }
+          }
+        ]
+        boundingObject Cylinder { height 0.03 radius 0.04 subdivision 32 }
+        physics Physics { density -1 mass 0.08 }
+      }
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 -0.115 0 dampingConstant 0.05 }
+      device [
+        PositionSensor { name "right wheel sensor" }
+        RotationalMotor { name "right wheel motor" maxVelocity 6 maxTorque 5 }
+      ]
+      endPoint Solid {
+        translation 0 -0.115 0
+        rotation 1 0 0 1.5708
+        name "front right wheel"
+        children [
+          Shape {
+            appearance PBRAppearance { baseColor 0.05 0.05 0.05 roughness 0.9 }
+            geometry Cylinder { height 0.03 radius 0.04 subdivision 32 }
+          }
+        ]
+        boundingObject Cylinder { height 0.03 radius 0.04 subdivision 32 }
+        physics Physics { density -1 mass 0.08 }
+      }
+    }
+    BallJoint {
+      jointParameters BallJointParameters { anchor -0.10 0 -0.025 }
+      endPoint Solid {
+        translation -0.10 0 -0.025
+        name "rear caster"
+        children [
+          Shape { geometry Sphere { radius 0.015 } }
+        ]
+        boundingObject Sphere { radius 0.015 }
+        physics Physics { density -1 mass 0.02 }
+      }
+    }
+    BallJoint {
+      jointParameters BallJointParameters { anchor 0.10 0 -0.025 }
+      endPoint Solid {
+        translation 0.10 0 -0.025
+        name "front caster"
+        children [
+          Shape { geometry Sphere { radius 0.015 } }
+        ]
+        boundingObject Sphere { radius 0.015 }
+        physics Physics { density -1 mass 0.02 }
+      }
+    }
+    Compass { name "heading compass" }
+    Lidar {
+      name "lidar"
+      translation 0 0 0.16
+      horizontalResolution 180
+      fieldOfView 6.28318
+      numberOfLayers 1
+      minRange 0.05
+      maxRange 4
+      noise 0.002
+    }
+    Camera {
+      name "camera"
+      translation 0.13 0 0.12
+      rotation 0 1 0 1.5708
+      fieldOfView 1
+      width 320
+      height 240
+    }
+  ]
+  boundingObject Pose {
+    translation 0 0 0.06
+    children [ Box { size 0.25 0.18 0.1 } ]
+  }
+  physics Physics { density -1 mass 1.5 }
+  controller "avoidance_practice_controller"
+  supervisor TRUE
+}
+
+# 12 x 10 m boundary.
+Solid {
+  translation 0 4.94 0.30
+  name "north boundary"
+  children [ Shape { appearance PBRAppearance { baseColor 0.40 0.44 0.48 } geometry Box { size 12 0.12 0.6 } } ]
+  boundingObject Box { size 12 0.12 0.6 }
+}
+Solid {
+  translation 0 -4.94 0.30
+  name "south boundary"
+  children [ Shape { appearance PBRAppearance { baseColor 0.40 0.44 0.48 } geometry Box { size 12 0.12 0.6 } } ]
+  boundingObject Box { size 12 0.12 0.6 }
+}
+Solid {
+  translation 5.94 0 0.30
+  name "east boundary"
+  children [ Shape { appearance PBRAppearance { baseColor 0.40 0.44 0.48 } geometry Box { size 0.12 10 0.6 } } ]
+  boundingObject Box { size 0.12 10 0.6 }
+}
+Solid {
+  translation -5.94 0 0.30
+  name "west boundary"
+  children [ Shape { appearance PBRAppearance { baseColor 0.40 0.44 0.48 } geometry Box { size 0.12 10 0.6 } } ]
+  boundingObject Box { size 0.12 10 0.6 }
+}
+
+# Scenario A: nominal y=-3.50 intersects this offset block; north side is wider.
+Solid {
+  translation -2.90 -3.25 0.25
+  name "asymmetric static obstacle"
+  children [ Shape { appearance PBRAppearance { baseColor 0.78 0.25 0.18 } geometry Box { size 0.45 0.45 0.50 } } ]
+  boundingObject Box { size 0.45 0.45 0.50 }
+}
+
+# Scenario B/C: 1.18 m free-width L corridor, 2.9 m horizontal leg.
+Solid {
+  translation 0.25 -3.65 0.30
+  name "corridor south wall"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 2.90 0.12 0.60 } } ]
+  boundingObject Box { size 2.90 0.12 0.60 }
+}
+Solid {
+  translation -0.05 -2.35 0.30
+  name "corridor north wall"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 2.30 0.12 0.60 } } ]
+  boundingObject Box { size 2.30 0.12 0.60 }
+}
+Solid {
+  translation 1.10 -1.65 0.30
+  name "corner west wall"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 0.12 1.40 0.60 } } ]
+  boundingObject Box { size 0.12 1.40 0.60 }
+}
+Solid {
+  translation 2.30 -2.30 0.30
+  name "corner east wall"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 0.12 2.70 0.60 } } ]
+  boundingObject Box { size 0.12 2.70 0.60 }
+}
+
+# Scenario D: one deterministic 0.28 m actor crosses x=1.70 at y=0.70.
+DEF CROSSING_ACTOR Robot {
+  translation 0.30 0.70 0.18
+  name "practice crossing obstacle"
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 1 0.62 0.05 roughness 0.6 }
+      geometry Box { size 0.28 0.28 0.36 }
+    }
+  ]
+  boundingObject Box { size 0.28 0.28 0.36 }
+  controller "practice_crossing_controller"
+  customData "axis=x min=0.30 max=3.10 speed=0.30 dwell=3.5 trigger_axis=y trigger=-0.50 robot=PRACTICE_ROBOT"
+  supervisor TRUE
+}
+
+# Final static obstacle verifies recovery after crossing commit.
+Solid {
+  translation 1.90 2.65 0.25
+  name "post-crossing static obstacle"
+  children [ Shape { appearance PBRAppearance { baseColor 0.58 0.28 0.68 } geometry Box { size 0.50 0.50 0.50 } } ]
+  boundingObject Box { size 0.50 0.50 0.50 }
+}

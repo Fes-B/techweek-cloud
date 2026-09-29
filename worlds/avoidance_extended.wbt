@@ -1,0 +1,438 @@
+#VRML_SIM R2025a utf8
+
+WorldInfo {
+  basicTimeStep 32
+}
+Viewpoint {
+  orientation 0 0 1 0
+  position 0 0 26
+}
+Background {
+  skyColor [ 0.76 0.86 1 ]
+}
+DirectionalLight {
+  direction -0.4 0.2 -1
+  intensity 1.2
+}
+Solid {
+  translation 0 0 -0.025
+  name "extended floor"
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.76 0.76 0.73 roughness 0.9 }
+      geometry Box { size 20 16 0.05 }
+    }
+  ]
+  boundingObject Box { size 20 16 0.05 }
+}
+
+# Extended robot: same body/sensors as avoidance_practice.wbt's PRACTICE_ROBOT.
+DEF EXTENDED_ROBOT Robot {
+  translation -9.50 -6.50 0.04
+  rotation 0 0 1 0
+  name "extended endurance robot"
+  children [
+    Pose {
+      translation 0 0 0.06
+      children [
+        Shape {
+          appearance PBRAppearance { baseColor 0.12 0.38 0.75 roughness 0.5 }
+          geometry Box { size 0.25 0.18 0.1 }
+        }
+      ]
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 0.115 0 dampingConstant 0.05 }
+      device [
+        PositionSensor { name "left wheel sensor" }
+        RotationalMotor { name "left wheel motor" maxVelocity 6 maxTorque 5 }
+      ]
+      endPoint Solid {
+        translation 0 0.115 0
+        rotation 1 0 0 1.5708
+        name "front left wheel"
+        children [
+          Shape {
+            appearance PBRAppearance { baseColor 0.05 0.05 0.05 roughness 0.9 }
+            geometry Cylinder { height 0.03 radius 0.04 subdivision 32 }
+          }
+        ]
+        boundingObject Cylinder { height 0.03 radius 0.04 subdivision 32 }
+        physics Physics { density -1 mass 0.08 }
+      }
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 -0.115 0 dampingConstant 0.05 }
+      device [
+        PositionSensor { name "right wheel sensor" }
+        RotationalMotor { name "right wheel motor" maxVelocity 6 maxTorque 5 }
+      ]
+      endPoint Solid {
+        translation 0 -0.115 0
+        rotation 1 0 0 1.5708
+        name "front right wheel"
+        children [
+          Shape {
+            appearance PBRAppearance { baseColor 0.05 0.05 0.05 roughness 0.9 }
+            geometry Cylinder { height 0.03 radius 0.04 subdivision 32 }
+          }
+        ]
+        boundingObject Cylinder { height 0.03 radius 0.04 subdivision 32 }
+        physics Physics { density -1 mass 0.08 }
+      }
+    }
+    BallJoint {
+      jointParameters BallJointParameters { anchor -0.10 0 -0.025 }
+      endPoint Solid {
+        translation -0.10 0 -0.025
+        name "rear caster"
+        children [
+          Shape { geometry Sphere { radius 0.015 } }
+        ]
+        boundingObject Sphere { radius 0.015 }
+        physics Physics { density -1 mass 0.02 }
+      }
+    }
+    BallJoint {
+      jointParameters BallJointParameters { anchor 0.10 0 -0.025 }
+      endPoint Solid {
+        translation 0.10 0 -0.025
+        name "front caster"
+        children [
+          Shape { geometry Sphere { radius 0.015 } }
+        ]
+        boundingObject Sphere { radius 0.015 }
+        physics Physics { density -1 mass 0.02 }
+      }
+    }
+    Compass { name "heading compass" }
+    Lidar {
+      name "lidar"
+      translation 0 0 0.16
+      horizontalResolution 180
+      fieldOfView 6.28318
+      numberOfLayers 1
+      minRange 0.05
+      maxRange 4
+      noise 0.002
+    }
+    Camera {
+      name "camera"
+      translation 0.13 0 0.12
+      rotation 0 1 0 1.5708
+      fieldOfView 1
+      width 320
+      height 240
+    }
+  ]
+  boundingObject Pose {
+    translation 0 0 0.06
+    children [ Box { size 0.25 0.18 0.1 } ]
+  }
+  physics Physics { density -1 mass 1.5 }
+  controller "avoidance_extended_controller"
+  supervisor TRUE
+}
+
+# 20 x 16 m boundary.
+Solid {
+  translation 0 7.94 0.30
+  name "north boundary"
+  children [ Shape { appearance PBRAppearance { baseColor 0.40 0.44 0.48 } geometry Box { size 20 0.12 0.6 } } ]
+  boundingObject Box { size 20 0.12 0.6 }
+}
+Solid {
+  translation 0 -7.94 0.30
+  name "south boundary"
+  children [ Shape { appearance PBRAppearance { baseColor 0.40 0.44 0.48 } geometry Box { size 20 0.12 0.6 } } ]
+  boundingObject Box { size 20 0.12 0.6 }
+}
+Solid {
+  translation 9.94 0 0.30
+  name "east boundary"
+  children [ Shape { appearance PBRAppearance { baseColor 0.40 0.44 0.48 } geometry Box { size 0.12 16 0.6 } } ]
+  boundingObject Box { size 0.12 16 0.6 }
+}
+Solid {
+  translation -9.94 0 0.30
+  name "west boundary"
+  children [ Shape { appearance PBRAppearance { baseColor 0.40 0.44 0.48 } geometry Box { size 0.12 16 0.6 } } ]
+  boundingObject Box { size 0.12 16 0.6 }
+}
+
+# --- Scenario 2/3: static-left-open then static-right-open, y=-6.50 baseline. ---
+Solid {
+  translation -4.95 -6.825 0.25
+  name "static-left obstacle"
+  children [ Shape { appearance PBRAppearance { baseColor 0.78 0.25 0.18 } geometry Box { size 0.45 0.45 0.50 } } ]
+  boundingObject Box { size 0.45 0.45 0.50 }
+}
+Solid {
+  translation -2.45 -6.175 0.25
+  name "static-right obstacle"
+  children [ Shape { appearance PBRAppearance { baseColor 0.78 0.25 0.18 } geometry Box { size 0.45 0.45 0.50 } } ]
+  boundingObject Box { size 0.45 0.45 0.50 }
+}
+
+# --- Scenario 4: slalom (3 obstacles alternating north/south of y=-6.50,
+# gently spaced so no single avoidance episode demands sustained sharp
+# steering into the next obstacle). ---
+Solid {
+  translation -1.20 -6.825 0.25
+  name "slalom obstacle 1"
+  children [ Shape { appearance PBRAppearance { baseColor 0.80 0.55 0.10 } geometry Box { size 0.45 0.45 0.50 } } ]
+  boundingObject Box { size 0.45 0.45 0.50 }
+}
+Solid {
+  translation 2.30 -6.175 0.25
+  name "slalom obstacle 2"
+  children [ Shape { appearance PBRAppearance { baseColor 0.80 0.55 0.10 } geometry Box { size 0.45 0.45 0.50 } } ]
+  boundingObject Box { size 0.45 0.45 0.50 }
+}
+Solid {
+  translation 5.80 -6.825 0.25
+  name "slalom obstacle 3"
+  children [ Shape { appearance PBRAppearance { baseColor 0.80 0.55 0.10 } geometry Box { size 0.45 0.45 0.50 } } ]
+  boundingObject Box { size 0.45 0.45 0.50 }
+}
+
+# --- Scenario 5: corridor 1, x=7.20 centerline, 4 width zones. ---
+# Zone 1 (y -6.50..-5.125, width 1.60)
+Solid {
+  translation 6.34 -5.8125 0.30
+  name "corridor1 west wall zone1"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 0.12 1.375 0.6 } } ]
+  boundingObject Box { size 0.12 1.375 0.6 }
+}
+Solid {
+  translation 8.06 -5.8125 0.30
+  name "corridor1 east wall zone1"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 0.12 1.375 0.6 } } ]
+  boundingObject Box { size 0.12 1.375 0.6 }
+}
+# Zone 2 (y -5.125..-3.75, width 1.25)
+Solid {
+  translation 6.515 -4.4375 0.30
+  name "corridor1 west wall zone2"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 0.12 1.375 0.6 } } ]
+  boundingObject Box { size 0.12 1.375 0.6 }
+}
+Solid {
+  translation 7.885 -4.4375 0.30
+  name "corridor1 east wall zone2"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 0.12 1.375 0.6 } } ]
+  boundingObject Box { size 0.12 1.375 0.6 }
+}
+# Zone 3 (y -3.75..-2.375, width 1.15, narrowest)
+Solid {
+  translation 6.565 -3.0625 0.30
+  name "corridor1 west wall zone3"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 0.12 1.375 0.6 } } ]
+  boundingObject Box { size 0.12 1.375 0.6 }
+}
+Solid {
+  translation 7.835 -3.0625 0.30
+  name "corridor1 east wall zone3"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 0.12 1.375 0.6 } } ]
+  boundingObject Box { size 0.12 1.375 0.6 }
+}
+# Zone 4 (y -2.375..-1.00, width 1.40)
+Solid {
+  translation 6.44 -1.6875 0.30
+  name "corridor1 west wall zone4"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 0.12 1.375 0.6 } } ]
+  boundingObject Box { size 0.12 1.375 0.6 }
+}
+Solid {
+  translation 7.96 -1.6875 0.30
+  name "corridor1 east wall zone4"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 0.12 1.375 0.6 } } ]
+  boundingObject Box { size 0.12 1.375 0.6 }
+}
+
+# --- Scenario 7: walled U-turn (entry leg x=8.30, exit leg x=6.80). ---
+Solid {
+  translation 9.00 2.50 0.30
+  name "u-turn outer east wall"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 0.12 2.40 0.6 } } ]
+  boundingObject Box { size 0.12 2.40 0.6 }
+}
+Solid {
+  translation 7.50 3.70 0.30
+  name "u-turn north cap"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 3.00 0.12 0.6 } } ]
+  boundingObject Box { size 3.00 0.12 0.6 }
+}
+Solid {
+  translation 6.00 2.50 0.30
+  name "u-turn outer west wall"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 0.12 2.40 0.6 } } ]
+  boundingObject Box { size 0.12 2.40 0.6 }
+}
+Solid {
+  translation 7.55 2.10 0.30
+  name "u-turn inner island"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 0.12 1.60 0.6 } } ]
+  boundingObject Box { size 0.12 1.60 0.6 }
+}
+
+# --- Scenario 8/10: Dynamic A (south->north) and Dynamic B (north->south), y=1.60 baseline. ---
+Robot {
+  translation 2.50 0.20 0.18
+  name "dynamic actor A"
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.10 0.70 0.30 roughness 0.6 }
+      geometry Box { size 0.28 0.28 0.36 }
+    }
+  ]
+  boundingObject Box { size 0.28 0.28 0.36 }
+  controller "extended_crossing_controller"
+  customData "axis=y min=0.20 max=3.00 speed=0.30 dwell=3.5 start=min trigger_axis=x trigger=3.40 trigger_dir=le gate_axis=y gate_min=1.00 gate_max=2.20 robot=EXTENDED_ROBOT"
+  supervisor TRUE
+}
+Robot {
+  translation -2.50 3.00 0.18
+  name "dynamic actor B"
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.70 0.30 0.70 roughness 0.6 }
+      geometry Box { size 0.28 0.28 0.36 }
+    }
+  ]
+  boundingObject Box { size 0.28 0.28 0.36 }
+  controller "extended_crossing_controller"
+  customData "axis=y min=0.20 max=3.00 speed=0.30 dwell=3.5 start=max trigger_axis=x trigger=-1.80 trigger_dir=le gate_axis=y gate_min=1.00 gate_max=2.20 robot=EXTENDED_ROBOT"
+  supervisor TRUE
+}
+
+# --- Scenario 11: phantom-regression static corner, y=1.60 baseline. ---
+Solid {
+  translation -6.25 1.925 0.25
+  name "phantom-regression obstacle"
+  children [ Shape { appearance PBRAppearance { baseColor 0.78 0.25 0.18 } geometry Box { size 0.45 0.45 0.50 } } ]
+  boundingObject Box { size 0.45 0.45 0.50 }
+}
+
+# --- Scenario 12: corridor 2 (x=-8.60 centerline, width 1.28) with Dynamic C (fast) and D (slow). ---
+Solid {
+  translation -9.30 3.70 0.30
+  name "corridor2 west wall"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 0.12 3.00 0.6 } } ]
+  boundingObject Box { size 0.12 3.00 0.6 }
+}
+Solid {
+  translation -7.90 3.70 0.30
+  name "corridor2 east wall"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 0.12 3.00 0.6 } } ]
+  boundingObject Box { size 0.12 3.00 0.6 }
+}
+Robot {
+  translation -9.00 3.20 0.18
+  name "dynamic actor C fast"
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.90 0.20 0.20 roughness 0.6 }
+      geometry Box { size 0.28 0.28 0.36 }
+    }
+  ]
+  boundingObject Box { size 0.28 0.28 0.36 }
+  controller "extended_crossing_controller"
+  customData "axis=x min=-9.00 max=-8.20 speed=0.45 dwell=3.5 start=min trigger_axis=y trigger=2.70 trigger_dir=ge gate_axis=x gate_min=-9.00 gate_max=-8.20 robot=EXTENDED_ROBOT"
+  supervisor TRUE
+}
+Robot {
+  translation -9.00 4.40 0.18
+  name "dynamic actor D slow"
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.20 0.50 0.90 roughness 0.6 }
+      geometry Box { size 0.28 0.28 0.36 }
+    }
+  ]
+  boundingObject Box { size 0.28 0.28 0.36 }
+  controller "extended_crossing_controller"
+  customData "axis=x min=-9.00 max=-8.20 speed=0.15 dwell=3.5 start=min trigger_axis=y trigger=3.90 trigger_dir=ge gate_axis=x gate_min=-9.00 gate_max=-8.20 robot=EXTENDED_ROBOT"
+  supervisor TRUE
+}
+
+# --- Scenario 13: static + dynamic mixed zone. ---
+Solid {
+  translation -6.65 5.725 0.25
+  name "mixed-zone static wall"
+  children [ Shape { appearance PBRAppearance { baseColor 0.78 0.25 0.18 } geometry Box { size 0.45 0.45 0.50 } } ]
+  boundingObject Box { size 0.45 0.45 0.50 }
+}
+Robot {
+  translation -6.50 5.60 0.18
+  name "dynamic actor mixed"
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.90 0.60 0.10 roughness 0.6 }
+      geometry Box { size 0.28 0.28 0.36 }
+    }
+  ]
+  boundingObject Box { size 0.28 0.28 0.36 }
+  controller "extended_crossing_controller"
+  customData "axis=y min=5.60 max=7.30 speed=0.30 dwell=3.5 start=min trigger_axis=x trigger=-8.00 trigger_dir=ge gate_axis=y gate_min=5.00 gate_max=6.00 robot=EXTENDED_ROBOT"
+  supervisor TRUE
+}
+
+# --- Scenario 15: Dynamic E, short-cycle repeated crossing (placed in open
+# ground ahead of slalom 2, clear of every static obstacle's footprint). ---
+Robot {
+  translation -4.20 6.20 0.18
+  name "dynamic actor E repeated"
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.60 0.20 0.90 roughness 0.6 }
+      geometry Box { size 0.28 0.28 0.36 }
+    }
+  ]
+  boundingObject Box { size 0.28 0.28 0.36 }
+  controller "extended_crossing_controller"
+  customData "axis=y min=6.20 max=6.90 speed=0.25 dwell=1.2 start=min trigger_axis=x trigger=-6.20 trigger_dir=ge gate_axis=y gate_min=6.00 gate_max=7.00 robot=EXTENDED_ROBOT"
+  supervisor TRUE
+}
+
+# --- Scenario 14: slalom 2 (3 obstacles), y=6.50 baseline, gently spaced. ---
+Solid {
+  translation -2.50 6.825 0.25
+  name "slalom2 obstacle 1"
+  children [ Shape { appearance PBRAppearance { baseColor 0.80 0.55 0.10 } geometry Box { size 0.45 0.45 0.50 } } ]
+  boundingObject Box { size 0.45 0.45 0.50 }
+}
+Solid {
+  translation 0.20 6.175 0.25
+  name "slalom2 obstacle 2"
+  children [ Shape { appearance PBRAppearance { baseColor 0.80 0.55 0.10 } geometry Box { size 0.45 0.45 0.50 } } ]
+  boundingObject Box { size 0.45 0.45 0.50 }
+}
+Solid {
+  translation 2.60 6.825 0.25
+  name "slalom2 obstacle 3"
+  children [ Shape { appearance PBRAppearance { baseColor 0.80 0.55 0.10 } geometry Box { size 0.45 0.45 0.50 } } ]
+  boundingObject Box { size 0.45 0.45 0.50 }
+}
+
+# --- Scenario 16: final corridor, y=6.50 centerline, width 1.30. ---
+Solid {
+  translation 4.45 7.21 0.30
+  name "final corridor north wall"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 2.50 0.12 0.6 } } ]
+  boundingObject Box { size 2.50 0.12 0.6 }
+}
+Solid {
+  translation 4.45 5.79 0.30
+  name "final corridor south wall"
+  children [ Shape { appearance PBRAppearance { baseColor 0.34 0.39 0.43 } geometry Box { size 2.50 0.12 0.6 } } ]
+  boundingObject Box { size 2.50 0.12 0.6 }
+}
+
+# --- Scenario 17: final static obstacle before GOAL. ---
+Solid {
+  translation 7.10 6.175 0.25
+  name "final static obstacle"
+  children [ Shape { appearance PBRAppearance { baseColor 0.58 0.28 0.68 } geometry Box { size 0.45 0.45 0.50 } } ]
+  boundingObject Box { size 0.45 0.45 0.50 }
+}

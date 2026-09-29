@@ -1,0 +1,254 @@
+#VRML_SIM R2025a utf8
+WorldInfo { basicTimeStep 32 }
+Viewpoint { orientation 0 0 1 0 position 0 0 12 }
+Background { skyColor [ 0.75 0.85 1 ] }
+DirectionalLight { direction -0.4 0.2 -1 intensity 1.2 }
+Solid {
+  translation 0 0 -0.025
+  name "floor"
+  children [ Shape { appearance PBRAppearance { baseColor 0.75 0.75 0.75 }
+    geometry Box { size 8 6 0.05 } } ]
+  boundingObject Box { size 8 6 0.05 }
+}
+Robot {
+  translation -3 -2 0.04
+  rotation 0 0 1 0
+  children [
+    Pose {
+      translation 0 0 0.06
+      children [
+        Shape {
+          appearance PBRAppearance {
+            baseColor 0.12 0.38 0.75
+            roughness 0.5
+            metalness 0
+          }
+          geometry Box {
+            size 0.25 0.18 0.1
+          }
+        }
+      ]
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters {
+        axis 0 1 0
+        anchor 0 0.115 0
+        dampingConstant 0.05
+      }
+      device [ PositionSensor { name "left wheel sensor" }
+        RotationalMotor {
+          name "left wheel motor"
+          maxVelocity 6
+          maxTorque 5
+        }
+      ]
+      endPoint Solid {
+        translation 0 0.115 0
+        rotation 1 0 0 1.5708
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 0.05 0.05 0.05
+              roughness 0.9
+              metalness 0
+            }
+            geometry Cylinder {
+              height 0.03
+              radius 0.04
+              subdivision 32
+            }
+          }
+        ]
+        name "front left wheel"
+        boundingObject Cylinder {
+          height 0.03
+          radius 0.04
+          subdivision 32
+        }
+        physics Physics {
+          density -1
+          mass 0.08
+        }
+      }
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters {
+        axis 0 1 0
+        anchor 0 -0.115 0
+        dampingConstant 0.05
+      }
+      device [ PositionSensor { name "right wheel sensor" }
+        RotationalMotor {
+          name "right wheel motor"
+          maxVelocity 6
+          maxTorque 5
+        }
+      ]
+      endPoint Solid {
+        translation 0 -0.115 0
+        rotation 1 0 0 1.5708
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 0.05 0.05 0.05
+              roughness 0.9
+              metalness 0
+            }
+            geometry Cylinder {
+              height 0.03
+              radius 0.04
+              subdivision 32
+            }
+          }
+        ]
+        name "front right wheel"
+        boundingObject Cylinder {
+          height 0.03
+          radius 0.04
+          subdivision 32
+        }
+        physics Physics {
+          density -1
+          mass 0.08
+        }
+      }
+    }
+    
+    
+    BallJoint {
+          jointParameters BallJointParameters { anchor -0.1 0 -0.025 }
+          endPoint Solid {
+            translation -0.1 0 -0.025
+            children [ Shape { geometry Sphere { radius 0.015 } } ]
+            boundingObject Sphere { radius 0.015 }
+            physics Physics { density -1 mass 0.02 }
+          }
+        }BallJoint {
+          jointParameters BallJointParameters { anchor 0.1 0 -0.025 }
+          endPoint Solid {
+            translation 0.1 0 -0.025
+            children [ Shape { geometry Sphere { radius 0.015 } } ]
+            boundingObject Sphere { radius 0.015 }
+            physics Physics { density -1 mass 0.02 }
+          }
+        }
+    Compass { name "heading compass" }
+    Lidar {
+      translation 0 0 0.16
+      horizontalResolution 180
+      fieldOfView 6.28318
+      numberOfLayers 1
+      minRange 0.05
+      maxRange 4
+      noise 0.002
+    }
+    Camera {
+      translation 0.13 0 0.12
+      rotation 0 1 0 1.5708
+      fieldOfView 1
+      width 320
+      height 240
+    }
+  ]
+  name "techweek practice robot"
+  boundingObject Pose {
+    translation 0 0 0.06
+    children [
+      Box {
+        size 0.25 0.18 0.1
+      }
+    ]
+  }
+  physics Physics {
+    density -1
+    mass 1.5
+  }
+  controller "dense_test_controller"
+  supervisor TRUE
+}
+Solid {
+  translation 0 3 0.3
+  name "north"
+  children [ Shape { appearance PBRAppearance { baseColor 0.4 0.45 0.5 }
+    geometry Box { size 8 0.12 0.6 } } ]
+  boundingObject Box { size 8 0.12 0.6 }
+}
+Solid {
+  translation 0 -3 0.3
+  name "south"
+  children [ Shape { appearance PBRAppearance { baseColor 0.4 0.45 0.5 }
+    geometry Box { size 8 0.12 0.6 } } ]
+  boundingObject Box { size 8 0.12 0.6 }
+}
+Solid {
+  translation -4 0 0.3
+  name "west"
+  children [ Shape { appearance PBRAppearance { baseColor 0.4 0.45 0.5 }
+    geometry Box { size 0.12 6 0.6 } } ]
+  boundingObject Box { size 0.12 6 0.6 }
+}
+Solid {
+  translation 4 0 0.3
+  name "east"
+  children [ Shape { appearance PBRAppearance { baseColor 0.4 0.45 0.5 }
+    geometry Box { size 0.12 6 0.6 } } ]
+  boundingObject Box { size 0.12 6 0.6 }
+}
+Solid {
+  translation -2.0 -0.9 0.3
+  name "divider 0"
+  children [ Shape { appearance PBRAppearance { baseColor 0.4 0.45 0.5 }
+    geometry Box { size 0.16 4.2 0.6 } } ]
+  boundingObject Box { size 0.16 4.2 0.6 }
+}
+Solid {
+  translation -0.6 0.9 0.3
+  name "divider 1"
+  children [ Shape { appearance PBRAppearance { baseColor 0.4 0.45 0.5 }
+    geometry Box { size 0.16 4.2 0.6 } } ]
+  boundingObject Box { size 0.16 4.2 0.6 }
+}
+Solid {
+  translation 0.8 -0.9 0.3
+  name "divider 2"
+  children [ Shape { appearance PBRAppearance { baseColor 0.4 0.45 0.5 }
+    geometry Box { size 0.16 4.2 0.6 } } ]
+  boundingObject Box { size 0.16 4.2 0.6 }
+}
+Solid {
+  translation 2.2 0.9 0.3
+  name "divider 3"
+  children [ Shape { appearance PBRAppearance { baseColor 0.4 0.45 0.5 }
+    geometry Box { size 0.16 4.2 0.6 } } ]
+  boundingObject Box { size 0.16 4.2 0.6 }
+}
+Robot {
+  translation -3 0 0.18
+  name "crossing west"
+  children [ Shape { appearance PBRAppearance { baseColor 1 0.6 0.1 }
+    geometry Box { size 0.28 0.28 0.36 } } ]
+  boundingObject Box { size 0.28 0.28 0.36 }
+  controller "moving_obstacle_controller"
+  customData "axis=x amplitude=0.40 speed=1.0 phase=0"
+  supervisor TRUE
+}
+Robot {
+  translation 0.1 0 0.18
+  name "crossing middle"
+  children [ Shape { appearance PBRAppearance { baseColor 1 0.6 0.1 }
+    geometry Box { size 0.28 0.28 0.36 } } ]
+  boundingObject Box { size 0.28 0.28 0.36 }
+  controller "moving_obstacle_controller"
+  customData "axis=x amplitude=0.40 speed=1.0 phase=1.4"
+  supervisor TRUE
+}
+Robot {
+  translation 3.1 0 0.18
+  name "crossing east"
+  children [ Shape { appearance PBRAppearance { baseColor 1 0.6 0.1 }
+    geometry Box { size 0.28 0.28 0.36 } } ]
+  boundingObject Box { size 0.28 0.28 0.36 }
+  controller "moving_obstacle_controller"
+  customData "axis=x amplitude=0.40 speed=1.0 phase=2.6"
+  supervisor TRUE
+}

@@ -1,0 +1,140 @@
+#VRML_SIM R2025a utf8
+
+WorldInfo {
+  basicTimeStep 32
+}
+Viewpoint {
+  orientation 0 0 1 0
+  position 1.5 0 6
+}
+Background {
+  skyColor [ 0.76 0.86 1 ]
+}
+DirectionalLight {
+  direction -0.4 0.2 -1
+  intensity 1.2
+}
+Solid {
+  translation 1.5 0 -0.025
+  name "minimal floor"
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.76 0.76 0.73 roughness 0.9 }
+      geometry Box { size 8 5 0.05 }
+    }
+  ]
+  boundingObject Box { size 8 5 0.05 }
+}
+
+# Exact robot body and sensors used by avoidance_extended.wbt.
+DEF SIMPLE_ROBOT Robot {
+  translation 0 0 0.04
+  rotation 0 0 1 0
+  name "simple avoidance robot"
+  children [
+    Pose {
+      translation 0 0 0.06
+      children [
+        Shape {
+          appearance PBRAppearance { baseColor 0.12 0.38 0.75 roughness 0.5 }
+          geometry Box { size 0.25 0.18 0.1 }
+        }
+      ]
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 0.115 0 dampingConstant 0.05 }
+      device [
+        PositionSensor { name "left wheel sensor" }
+        RotationalMotor { name "left wheel motor" maxVelocity 6 maxTorque 5 }
+      ]
+      endPoint Solid {
+        translation 0 0.115 0
+        rotation 1 0 0 1.5708
+        name "front left wheel"
+        children [ Shape { appearance PBRAppearance { baseColor 0.05 0.05 0.05 roughness 0.9 } geometry Cylinder { height 0.03 radius 0.04 subdivision 32 } } ]
+        boundingObject Cylinder { height 0.03 radius 0.04 subdivision 32 }
+        physics Physics { density -1 mass 0.08 }
+      }
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 -0.115 0 dampingConstant 0.05 }
+      device [
+        PositionSensor { name "right wheel sensor" }
+        RotationalMotor { name "right wheel motor" maxVelocity 6 maxTorque 5 }
+      ]
+      endPoint Solid {
+        translation 0 -0.115 0
+        rotation 1 0 0 1.5708
+        name "front right wheel"
+        children [ Shape { appearance PBRAppearance { baseColor 0.05 0.05 0.05 roughness 0.9 } geometry Cylinder { height 0.03 radius 0.04 subdivision 32 } } ]
+        boundingObject Cylinder { height 0.03 radius 0.04 subdivision 32 }
+        physics Physics { density -1 mass 0.08 }
+      }
+    }
+    BallJoint {
+      jointParameters BallJointParameters { anchor -0.10 0 -0.025 }
+      endPoint Solid {
+        translation -0.10 0 -0.025
+        name "rear caster"
+        children [ Shape { geometry Sphere { radius 0.015 } } ]
+        boundingObject Sphere { radius 0.015 }
+        physics Physics { density -1 mass 0.02 }
+      }
+    }
+    BallJoint {
+      jointParameters BallJointParameters { anchor 0.10 0 -0.025 }
+      endPoint Solid {
+        translation 0.10 0 -0.025
+        name "front caster"
+        children [ Shape { geometry Sphere { radius 0.015 } } ]
+        boundingObject Sphere { radius 0.015 }
+        physics Physics { density -1 mass 0.02 }
+      }
+    }
+    Compass { name "heading compass" }
+    Lidar {
+      name "lidar"
+      translation 0 0 0.16
+      horizontalResolution 180
+      fieldOfView 6.28318
+      numberOfLayers 1
+      minRange 0.05
+      maxRange 4
+      noise 0.002
+    }
+    Camera {
+      name "camera"
+      translation 0.13 0 0.12
+      rotation 0 1 0 1.5708
+      fieldOfView 1
+      width 320
+      height 240
+    }
+  ]
+  boundingObject Pose {
+    translation 0 0 0.06
+    children [ Box { size 0.25 0.18 0.1 } ]
+  }
+  physics Physics { density -1 mass 1.5 }
+  controller "simple_avoidance_controller"
+  supervisor TRUE
+}
+
+DEF CASE_OBSTACLE Solid {
+  translation 30 30 0.25
+  name "single case obstacle"
+  children [ Shape { appearance PBRAppearance { baseColor 0.80 0.22 0.12 roughness 0.6 } geometry Box { size 0.45 0.45 0.50 } } ]
+  boundingObject Box { size 0.45 0.45 0.50 }
+}
+DEF CORRIDOR_LEFT Solid {
+  translation 30 30 0.30
+  name "corridor left wall"
+  children [ Shape { appearance PBRAppearance { baseColor 0.35 0.39 0.44 } geometry Box { size 4.0 0.12 0.60 } } ]
+  boundingObject Box { size 4.0 0.12 0.60 }
+}
+DEF CORRIDOR_RIGHT Solid {
+  translation 30 30 0.30
+  name "corridor right wall"
+  children [ Shape { appearance PBRAppearance { baseColor 0.35 0.39 0.44 } geometry Box { size 4.0 0.12 0.60 } } ]
+  boundingObject Box { size 4.0 0.12 0.60 }
+}
