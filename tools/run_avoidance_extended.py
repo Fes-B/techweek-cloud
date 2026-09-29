@@ -1,4 +1,11 @@
-"""Run the extended endurance benchmark world headlessly."""
+"""Run the extended endurance benchmark world headlessly.
+
+    python tools/run_avoidance_extended.py              # official (420 s limit)
+    python tools/run_avoidance_extended.py --unlimited  # DIAGNOSTIC: no time limit
+
+The unlimited run keeps contacts and the stall criterion; it writes its own
+log/result files so it can never be mistaken for the official result.
+"""
 
 import os
 from pathlib import Path
@@ -21,8 +28,12 @@ environment["PATH"] = (
     + os.pathsep
     + environment.get("PATH", "")
 )
-log = Path(tempfile.gettempdir(), "techweek-avoidance-extended.log")
-report = Path(tempfile.gettempdir(), "techweek-avoidance-extended-result.json")
+unlimited = "--unlimited" in sys.argv[1:]
+if unlimited:
+    environment["EXTENDED_TIME_LIMIT"] = "unlimited"
+suffix = "-unlimited" if unlimited else ""
+log = Path(tempfile.gettempdir(), f"techweek-avoidance-extended{suffix}.log")
+report = Path(tempfile.gettempdir(), f"techweek-avoidance-extended{suffix}-result.json")
 report.unlink(missing_ok=True)
 
 with log.open("w", encoding="utf-8") as stream:

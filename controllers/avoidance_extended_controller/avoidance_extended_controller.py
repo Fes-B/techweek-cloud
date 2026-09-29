@@ -129,8 +129,21 @@ STALL_SECONDS = 35.0
 TOTAL_LAPS = max(1, int(os.environ.get("EXTENDED_LAPS", "1")))
 _debug_wp_env = os.environ.get("EXTENDED_DEBUG_WAYPOINT")
 DEBUG_WAYPOINT = int(_debug_wp_env) if _debug_wp_env is not None else None
+# DIAGNOSTIC ONLY: EXTENDED_TIME_LIMIT=unlimited ignores the official
+# MAX_SECONDS limit to find out whether -- and where -- the course can be
+# finished at all.  Contacts and the STALL_SECONDS stall still end the run
+# exactly as in the official benchmark; an unlimited result is never an
+# official result and is written to its own file.
+TIME_LIMIT_MODE = os.environ.get("EXTENDED_TIME_LIMIT", "official")
+if TIME_LIMIT_MODE not in ("official", "unlimited"):
+    raise ValueError(f"EXTENDED_TIME_LIMIT must be official or unlimited, got {TIME_LIMIT_MODE!r}")
+UNLIMITED_TIME = TIME_LIMIT_MODE == "unlimited"
+# Unlimited mode only: ends a run that neither finishes, stalls nor collides.
+DIAGNOSTIC_SAFETY_CAP_SECONDS = 3600.0
 RESULT_PATH = Path(
-    tempfile.gettempdir(), "techweek-avoidance-extended-result.json"
+    tempfile.gettempdir(),
+    "techweek-avoidance-extended-unlimited-result.json" if UNLIMITED_TIME
+    else "techweek-avoidance-extended-result.json",
 )
 # "legacy": avoidance.DynamicWindowAvoidance + path-follower arbitration.
 # "v2": avoidance_v2.ProgressDWA drives directly (the waypoint is its goal).
@@ -161,6 +174,11 @@ def classify_action(control, action, left, right):
 def main():
     print(f"[PYTHON] {sys.version.split()[0]} {sys.executable}", flush=True)
     print(f"[LAPS] total_laps={TOTAL_LAPS}", flush=True)
+    print(
+        f"[TIME_LIMIT] mode={TIME_LIMIT_MODE} official_limit={MAX_SECONDS:.0f}s"
+        + (" (DIAGNOSTIC: official limit not applied)" if UNLIMITED_TIME else ""),
+        flush=True,
+    )
     robot = Supervisor()
     io = RobotIO(robot)
     if PLANNER == "v2":
@@ -203,7 +221,8 @@ def main():
     waypoint_stats = [
         {"index": index, "role": role, "seconds": 0.0, "recoveries": 0,
          "max_no_progress_s": 0.0, "min_clearance": None, "contacts": 0,
-         "min_displacement_1s": None, "reached": False, "odometry_error": None}
+         "min_displacement_1s": None, "reached": False, "reached_at": None,
+         "odometry_error": None}
         for index, role in enumerate(WAYPOINT_ROLES)
     ]
     recovery_seen = planner.recovery_count if PLANNER == "v2" else 0
@@ -265,6 +284,7 @@ def main():
                         scenario_stats[scenario_i]["passed"] = True
                         scenario_stats[scenario_i]["pass_time"] = now
                 waypoint_stats[waypoint_index]["reached"] = True
+                waypoint_stats[waypoint_index]["reached_at"] = now
                 waypoint_stats[waypoint_index]["odometry_error"] = position_error
                 waypoint_index += 1
                 best_distance = float("inf")
@@ -307,9 +327,10 @@ def main():
                 best_distance = measured_distance
                 progress_time = now
         stalled = waypoint_index < len(WAYPOINTS) and now - progress_time > STALL_SECONDS
-        timed_out = now > MAX_SECONDS
+        timed_out = not UNLIMITED_TIME and now > MAX_SECONDS
+        diagnostic_cap_reached = UNLIMITED_TIME and now > DIAGNOSTIC_SAFETY_CAP_SECONDS
 
-        if goal_reached or stalled or timed_out or contacts:
+        if goal_reached or stalled or timed_out or diagnostic_cap_reached or contacts:
             io.stop()
             if goal_reached:
                 laps_completed += 1
@@ -320,6 +341,7 @@ def main():
                 and contacts == 0
                 and not stalled
                 and not timed_out
+                and not diagnostic_cap_reached
                 and scenario_passed == len(SCENARIOS)
             )
             if waypoint_index < len(WAYPOINTS):
@@ -327,6 +349,12 @@ def main():
             result = {
                 "planner": PLANNER,
                 "pose_source": POSE_SOURCE,
+                "time_limit_mode": TIME_LIMIT_MODE,
+                "official_time_limit_s": MAX_SECONDS,
+                "within_official_time_limit": now <= MAX_SECONDS,
+                # Official pass: every criterion *and* the 420 s limit.
+                "official_completed": passed and now <= MAX_SECONDS,
+                "diagnostic_cap_reached": diagnostic_cap_reached,
                 "max_position_error": max_position_error,
                 "completed": passed,
                 "goal_reached": goal_reached,
