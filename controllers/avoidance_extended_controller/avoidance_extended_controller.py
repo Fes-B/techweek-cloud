@@ -152,6 +152,11 @@ PLANNER = os.environ.get("AVOIDANCE_PLANNER", "legacy")
 # waypoint check instead of encoder/compass odometry, to separate avoidance
 # behaviour from odometry drift.  Official benchmark runs use "odometry".
 POSE_SOURCE = os.environ.get("EXTENDED_POSE_SOURCE", "odometry")
+# DIAGNOSTIC ONLY: EXTENDED_ODOMETRY_DIAG=1 prints one [ODO] line per control
+# step comparing the encoder/compass pose against the Supervisor truth pose.
+# It never feeds the planner; it exists to localise where odometry error is
+# accumulated (straight vs. turning, scale vs. heading).
+ODOMETRY_DIAG = os.environ.get("EXTENDED_ODOMETRY_DIAG", "0") == "1"
 
 
 def scenario_index_for_waypoint(waypoint_index):
@@ -212,6 +217,7 @@ def main():
     debug_switch_pose = None
     debug_switch_count = 0
 
+    diag_previous_truth = None
     frame_counts = {"path_follow": 0, "avoidance_override": 0, "recovery": 0, "stop": 0}
     max_position_error = 0.0
     compute_total = 0.0
@@ -267,6 +273,46 @@ def main():
         pose = odometry.update()
         position_error = math.dist(pose[:2], truth[:2])
         max_position_error = max(max_position_error, position_error)
+        if ODOMETRY_DIAG:
+            if diag_previous_truth is None:
+                diag_previous_truth = truth
+            truth_dx = truth[0] - diag_previous_truth[0]
+            truth_dy = truth[1] - diag_previous_truth[1]
+            truth_yaw_mid = diag_previous_truth[2] + 0.5 * math.atan2(
+                math.sin(truth[2] - diag_previous_truth[2]),
+                math.cos(truth[2] - diag_previous_truth[2]),
+            )
+            truth_ds = truth_dx * math.cos(truth_yaw_mid) + truth_dy * math.sin(truth_yaw_mid)
+            truth_dn = -truth_dx * math.sin(truth_yaw_mid) + truth_dy * math.cos(truth_yaw_mid)
+            truth_dyaw = math.atan2(
+                math.sin(truth[2] - diag_previous_truth[2]),
+                math.cos(truth[2] - diag_previous_truth[2]),
+            )
+            encoder_dyaw = (odometry.last_dr - odometry.last_dl) / WHEEL_TRACK
+            heading_error = math.atan2(
+                math.sin(pose[2] - truth[2]), math.cos(pose[2] - truth[2])
+            )
+            error_x = pose[0] - truth[0]
+            error_y = pose[1] - truth[1]
+            longitudinal_error = (
+                error_x * math.cos(truth[2]) + error_y * math.sin(truth[2])
+            )
+            lateral_error = (
+                -error_x * math.sin(truth[2]) + error_y * math.cos(truth[2])
+            )
+            print(
+                f"[ODO] t={now:.3f} wp={waypoint_index} "
+                f"enc_ds={odometry.last_ds:.6f} truth_ds={truth_ds:.6f} "
+                f"truth_dn={truth_dn:.6f} "
+                f"enc_dyaw={encoder_dyaw:.6f} compass_dyaw={odometry.last_turn:.6f} "
+                f"truth_dyaw={truth_dyaw:.6f} "
+                f"err={position_error:.5f} err_lon={longitudinal_error:.5f} "
+                f"err_lat={lateral_error:.5f} err_yaw={heading_error:.6f} "
+                f"truth=({truth[0]:.5f},{truth[1]:.5f},{truth[2]:.5f}) "
+                f"odom=({pose[0]:.5f},{pose[1]:.5f},{pose[2]:.5f})",
+                flush=True,
+            )
+            diag_previous_truth = truth
         if POSE_SOURCE == "truth":
             pose = truth
 

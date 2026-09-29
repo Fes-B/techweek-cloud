@@ -66,6 +66,34 @@ LIDAR_REVERSED = True
 WHEEL_RADIUS = 0.04
 WHEEL_TRACK = 0.23
 
+# Odometry-only encoder -> metre conversion.
+#
+# WHEEL_RADIUS above is the *nominal* wheel geometry and is what the wheel-speed
+# commands must keep using (v = WHEEL_RADIUS * omega), so DWA behaviour is
+# unchanged.  The radius that converts *encoder* revolutions into travelled
+# distance is the wheel's effective ROLLING radius, which is not identical:
+#
+#   Measured (Extended, EXTENDED_ODOMETRY_DIAG=1, encoder pose vs. Supervisor
+#   truth pose, 208 steady-state straight steps at 0.24 m/s with no
+#   acceleration and no rotation): truth distance / encoder distance =
+#   1.003012, i.e. an effective rolling radius of 0.040120 m.  The deficit is
+#   systematic, not noise: it is present in every steady straight segment and
+#   accumulated 7.4 cm of the ~7.9 cm odometry error over the 16.6 m up to
+#   Extended waypoint 6.
+#
+#   Cause: the wheel's boundingObject Cylinder (radius 0.04, subdivision 32)
+#   collides as a tessellated 32-gon prism whose faces are tangent to the
+#   nominal radius, so one wheel revolution advances the robot by the polygon
+#   perimeter rather than 2*pi*0.04.  Effective radius =
+#   n*sin(pi/n)/(pi*cos(pi/n)) * 0.04 = 0.0401259 m for n = 32, which agrees
+#   with the measurement to 1.5e-5 m.
+#
+# EVENT DAY: re-measure this on the event robot (drive a known straight
+# distance, divide by the summed encoder radians * 2) instead of reusing the
+# simulation value; setting it equal to WHEEL_RADIUS restores the old
+# behaviour exactly.
+ODOMETRY_WHEEL_RADIUS = 0.040120
+
 # ACTIVE: local Dynamic Window Approach settings.
 LIDAR_FIELD_OF_VIEW = 2.0 * 3.141592653589793
 DWA_MIN_RANGE = 0.055

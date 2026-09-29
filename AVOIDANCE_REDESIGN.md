@@ -371,6 +371,87 @@ any run yet.
    the rollout's unwrapped rotation.  It was reverted because it has not been
    through the full regression.
 
+## 4b. Windows odometry scale calibration (waypoint-6 stall)
+
+### Symptom
+
+Windows, v2, Extended:
+
+| pose source | result |
+| --- | --- |
+| `odometry` | stalled at waypoint 6 (`slalom1 past obstacle 3`), 0 contacts, odometry error ~7.3 cm, recoveries made no progress |
+| `truth` (diagnostic) | waypoint 6 passed, reached 27/39, contact at the dynamic-C actor |
+
+The planner was therefore not the failing component: the same planner with a
+correct pose drives through.  A separate qualitative observation (an unsaved
+Webots nudge of the fifth slalom obstacle, no log) also cleared the stall,
+i.e. the passage margin there is the same size as the odometry error.
+
+### Measurement
+
+`EXTENDED_ODOMETRY_DIAG=1` prints one `[ODO]` line per control step with the
+encoder/compass pose, the Supervisor truth pose (diagnostic only, never fed
+to the planner), and the per-step encoder vs. truth increments.  Decomposed
+over the 16.6 m up to waypoint 6 (truth-pose run, so the trajectory is the
+known-good one):
+
+| component | value |
+| --- | --- |
+| heading error (compass) | max 1.3e-4 rad -- not a contributor |
+| lateral error at wp 6 | +0.6 cm |
+| longitudinal error at wp 6 | **-5.9 cm** |
+| encoder path vs. truth path | 16.5018 m vs. 16.5629 m, ratio **1.00370** |
+| 208 steady straight steps, 0.24 m/s, no accel, no rotation | ratio **1.003012** |
+| accumulated while accelerating | +0.001 m over 1.61 m |
+| accumulated while decelerating | +0.016 m over 1.20 m |
+| accumulated at constant command | +0.058 m over 13.69 m |
+| |lateral slip| up to wp 6 | 0.013 m |
+
+So the error is almost entirely a **systematic longitudinal scale deficit**
+present even in perfectly steady straight driving -- not heading integration,
+not integration math, not compass/encoder interaction, not pose-update order,
+and not acceleration slip.
+
+### Root cause
+
+The steady-state ratio implies an effective rolling radius of 0.040120 m
+against the `WHEEL_RADIUS = 0.04` used to convert encoder radians to metres.
+The wheel's `boundingObject Cylinder { radius 0.04 subdivision 32 }` collides
+as a tessellated 32-gon prism whose faces are tangent to the nominal radius,
+so one revolution advances the robot by the polygon perimeter:
+
+```
+r_eff = n * sin(pi/n) / (pi * cos(pi/n)) * 0.04 = 0.0401259 m  (n = 32)
+```
+
+which agrees with the measured 0.040120 m to 1.5e-5 m.  Encoder distance was
+therefore under-read by 0.3 % everywhere, ~5 cm of the ~7.4 cm shortfall up
+to waypoint 6; the remainder is deceleration overshoot and turn slip.
+
+### Fix
+
+`config.ODOMETRY_WHEEL_RADIUS = 0.040120`, used **only** by
+`practice_odometry.EncoderPose`.  `WHEEL_RADIUS` is unchanged, so every
+wheel-speed command, DWA window, clearance and safety margin is bit-identical.
+Setting the two equal restores the previous behaviour exactly; on event day
+the constant must be re-measured on the event robot.
+
+### After
+
+| | before | after |
+| --- | --- | --- |
+| Extended odometry mode | stalled at wp 6 | 27/39, no stall |
+| odometry error at wp 6 | ~7.3 cm | **0.39 cm** |
+| odometry error at wp 7 | -- | 3.19 cm |
+| max odometry error, whole run | -- | 5.24 cm (truth-mode run: 11.25 cm) |
+| steady straight scale | 1.00301 | 0.99975 |
+| dynamic-B (wp 23) | -- | reached, 0 contacts |
+| Practice max odometry error | 3.24 cm | 1.18 cm |
+
+Residual scale error is now confined to fast rotation (`|dyaw| >= 0.01`
+rad/step: ratio 1.0227), i.e. turn slip, which a distance scale cannot fix
+and which heading does not depend on (the compass measures it).
+
 ## 5. How to run
 
 ```
@@ -379,6 +460,7 @@ AVOIDANCE_PLANNER=v2 python tools/run_avoidance_extended.py
 AVOIDANCE_PLANNER=v2 python tools/run_avoidance_extended.py --unlimited   # DIAGNOSTIC only
 AVOIDANCE_PLANNER=v2 EXTENDED_DEBUG_WAYPOINT=4 python tools/run_avoidance_extended.py
 EXTENDED_POSE_SOURCE=truth ...          # diagnostic only, never for scoring
+EXTENDED_ODOMETRY_DIAG=1 ...            # diagnostic only: [ODO] encoder vs truth
 python tools/run_avoidance_scenarios.py --world regression --planner v2
 python tools/run_avoidance_scenarios.py --world stress --planner v2 --jobs 3
 python tools/avoidance_sim.py --planner v2 --case all      # 2D harness
